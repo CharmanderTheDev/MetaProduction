@@ -1,0 +1,67 @@
+#[derive(Clone, Hash)]
+pub struct Point {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone)]
+pub struct Rectangle {
+    min: Point,
+    max: Point,
+}
+impl Rectangle {
+    fn from_coordinates(min_x: i32, min_y: i32, max_x: i32, max_y: i32) -> Self {
+        Self { min: Point { x: min_x, y: min_y }, max: Point { x: max_x, y: max_y } }
+    }
+
+    fn from_points(min: Point, max: Point) -> Self {
+        Self { min, max }
+    }
+}
+
+fn rectangles_intersect(a: &Rectangle, b: &Rectangle) -> bool {
+    a.min.x <= b.max.x && a.max.x >= b.min.x && a.min.y <= b.max.y && a.max.y >= b.min.y
+}
+
+pub struct Space {
+    rectangles: Vec<Rectangle>,
+    max_rectangle: Rectangle,
+}
+impl Space {
+    fn new() -> Self {
+        Self { rectangles: vec![], max_rectangle: Rectangle::from_coordinates(0, 0, 0, 0) }
+    }
+
+    fn add(&mut self, rectangle: Rectangle) -> &mut Space {
+
+        if self.rectangles.is_empty() { self.max_rectangle = rectangle.clone(); }
+
+        else {
+            if self.max_rectangle.min.x > rectangle.min.x { self.max_rectangle.min.x = rectangle.min.x; }
+            if self.max_rectangle.min.y > rectangle.min.y { self.max_rectangle.min.y = rectangle.min.y; }
+            if self.max_rectangle.max.x < rectangle.max.x { self.max_rectangle.max.x = rectangle.max.x; }
+            if self.max_rectangle.max.y < rectangle.max.y { self.max_rectangle.max.y = rectangle.max.y; }
+        }
+
+        self.rectangles.push(rectangle);
+
+        self
+    }
+}
+
+pub fn spaces_intersect(a: &Space, b: &Space) -> bool {
+
+    // O(1) max rectangle check
+    if !rectangles_intersect(&a.max_rectangle, &b.max_rectangle) { return false; }
+
+    // O(n) max rectangles vs individual rectangles check
+    if !a.rectangles.iter().any(|r| rectangles_intersect(r, &b.max_rectangle)) { return false; }
+    if !b.rectangles.iter().any(|r| rectangles_intersect(r, &a.max_rectangle)) { return false; }
+
+    // O(n^2) individual rectangles check
+    for rectangle in &a.rectangles {
+        if b.rectangles.iter().any(|r| rectangles_intersect(r, rectangle)) { return true; }
+    }
+
+    false
+}
