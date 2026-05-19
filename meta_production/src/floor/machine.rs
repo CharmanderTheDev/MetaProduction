@@ -1,33 +1,26 @@
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use crate::geometry::{Space, Point};
+use crate::floor::surface::Port;
 
-struct Port {
-    x: i32,
-    y: i32,
+pub trait Recipe {
 
-    product_id: u32,
-    quantity: f32,
-}
-impl Hash for Port {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.product_id.hash(state);
-    }
-}
+    /// initializes recipe state and returns points of needed ports
+    fn init(&mut self, machine_point: Point) -> Vec<Point>;
 
-trait Recipe {
+    /// advances recipe progress
+    fn tick(&mut self, port_ids: &mut HashMap<u64, Port>);
 
-    fn init(&mut self);
-    fn tick(&mut self, input_buffer: &mut Vec<Port>, output_buffer: &mut Vec<Port>);
+    /// gives port ids to recipe in the order they were requested by [init]
+    fn give_ports(&mut self, port_ids: Vec<u64>);
+
+    /// returns port ids given by [give_ports]
+    fn return_ports(&mut self) -> Vec<u64>;
 }
 
-struct Machine {
+pub struct Machine {
 
-    id: u32,
+    pub id: u32,
 
-    inputs: Vec<Port>,
-    outputs: Vec<Port>,
-
-    space: Space,
-
-    recipe: dyn Recipe,
+    pub space: Space,
+    pub recipe: Box<dyn Recipe>,
 }

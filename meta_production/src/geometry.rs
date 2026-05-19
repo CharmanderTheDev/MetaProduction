@@ -1,7 +1,20 @@
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Eq, PartialEq)]
 pub struct Point {
     x: i32,
     y: i32,
+}
+impl Point {
+
+    pub fn add(&mut self, other: &Point) {
+
+        self.x += other.x;
+        self.y += other.y;
+    }
+}
+
+pub fn add_points(a: &Point, b: &Point) -> Point {
+
+    return Point { x: a.x + b.x, y: a.y + b.y };
 }
 
 #[derive(Clone)]
@@ -46,6 +59,11 @@ impl Space {
         self.rectangles.push(rectangle);
 
         self
+    }
+
+    pub(crate) fn top_left(&self) -> Point {
+
+        return self.max_rectangle.min.clone();
     }
 }
 
