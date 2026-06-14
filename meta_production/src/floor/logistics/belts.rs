@@ -73,7 +73,7 @@ struct Buffer {
 struct Connection {
 
     direction: Direction,
-    link: Option<(NetComponent, BeltPart)>,
+    link: Option<(NetComponent, BeltPart)>, // The BeltPart segment encodes which part of the referenced NetComponent this Connection links to.
 }
 
 struct StraightBelt {
@@ -243,8 +243,6 @@ impl BeltNet {
 
     fn add_port(&mut self, port_ids: &HashMap<u64, Port>, port: u64) -> Result<(), BeltOopsie> {
 
-        todo!("currently set up to establish connections between a port and a neighbor but not a neighbor and the new port.");
-
         // Error checking
         let port_ref: &Port = match port_ids.get(&port) {
             Some(p) => p,
@@ -273,7 +271,7 @@ impl BeltNet {
 
                 NetComponent::SPLITTER(splitter_id) => {
 
-                    let splitter: &Splitter = self.splitters.get(splitter_id).unwrap();
+                    let splitter: &mut Splitter = self.splitters.get_mut(splitter_id).unwrap();
 
                     match splitter.direction_to_part(direction.opposite()) {
 
@@ -282,13 +280,34 @@ impl BeltNet {
                             if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
 
                             new_port.destination = Some(PullRef::SPLITTER(*splitter_id));
+
+                            splitter.from.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1));
+                            splitter.source = Some(PushRef::PORT(new_id));
+
                         }
 
                         side @ (BeltPart::OUTPUT1 | BeltPart::OUTPUT2) => {
 
                             if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
 
-                            new_port.source = Some(PushRef::SPLITTER(*splitter_id, side.to_dual_belt_part().unwrap()))
+                            new_port.source = Some(PushRef::SPLITTER(*splitter_id, side.to_dual_belt_part().unwrap()));
+
+                            match side {
+
+                                BeltPart::OUTPUT1 => {
+
+                                    splitter.to1.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
+                                    splitter.destination1 = Some(PullRef::PORT(new_id));
+                                }
+
+                                BeltPart::OUTPUT2 => {
+
+                                    splitter.to2.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
+                                    splitter.destination2 = Some(PullRef::PORT(new_id));
+                                }
+
+                                _ => {}
+                            }
                         }
 
                         _ => {} // If it's None we can leave the source and destination alone
@@ -297,7 +316,7 @@ impl BeltNet {
 
                 NetComponent::MERGER(merger_id) => {
 
-                    let merger: &Merger = self.mergers.get(merger_id).unwrap();
+                    let merger: &mut Merger = self.mergers.get_mut(merger_id).unwrap();
 
                     match merger.direction_to_part(direction.opposite()) {
 
@@ -306,6 +325,23 @@ impl BeltNet {
                             if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
 
                             new_port.destination = Some(PullRef::MERGER(*merger_id, side.to_dual_belt_part().unwrap()));
+
+                            match side {
+
+                                BeltPart::INPUT1 => {
+
+                                    merger.from1.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1));
+                                    merger.source1 = Some(PushRef::PORT(new_id));
+                                }
+
+                                BeltPart::INPUT2 => {
+
+                                    merger.from2.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1));
+                                    merger.source2 = Some(PushRef::PORT(new_id));
+                                }
+
+                                _ => {}
+                            }
                         }
 
                         BeltPart::OUTPUT1 => {
@@ -313,6 +349,9 @@ impl BeltNet {
                             if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
 
                             new_port.source = Some(PushRef::MERGER(*merger_id));
+
+                            merger.to.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
+                            merger.destination = Some(PullRef::PORT(new_id));
                         }
 
                         _ => {} // If it's None we can leave the source and destination alone
@@ -321,36 +360,74 @@ impl BeltNet {
 
                 NetComponent::STRAIGHT(straight_id) => {
 
-                    let straight: &StraightBelt = self.straights.get(&straight_id).unwrap();
+                    let straight: &mut StraightBelt = self.straights.get_mut(&straight_id).unwrap();
 
                     match straight.direction_to_part(direction.opposite()) {
 
                         BeltPart::INPUT1 => {
 
-                            match self.belt_destination(*straight_id) {
+                            straight.from.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1)); // Since we are adjacent to the belt, we attach with the from variable.
 
-                                None => {}
-                                Some(pull_ref) => {
+                            match self.belt_destination(*straight_id) { None => {} Some(pull_ref) => {
 
-                                    if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
+                                if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
 
-                                    new_port.destination = Some(pull_ref);
+                                match pull_ref { // Note that we never attach the from variable, as these components are not adjacent, but at the end of a belt chain.
+
+                                    PullRef::PORT(port_id) => { self.ports.get_mut(&port_id).unwrap().source = Some(PushRef::PORT(new_id)); }
+                                    PullRef::MERGER(merger_id, ref part) => {
+
+                                        let merger: &mut Merger = self.mergers.get_mut(&merger_id).unwrap();
+
+                                        match part {
+
+                                            DualBeltPart::FIRST => { merger.source1 = Some(PushRef::PORT(new_id)); }
+                                            DualBeltPart::SECOND => { merger.source2 = Some(PushRef::PORT(new_id)); }
+                                        }
+                                    }
+                                    PullRef::SPLITTER(splitter_id) => {
+
+                                        let splitter: &mut Splitter = self.splitters.get_mut(&splitter_id).unwrap();
+
+                                        splitter.source = Some(PushRef::PORT(new_id));
+                                    }
                                 }
-                            }
+
+                                new_port.destination = Some(pull_ref);
+                            } }
                         }
 
                         BeltPart::OUTPUT1 => {
 
-                            match self.belt_source(*straight_id) {
+                            straight.to.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
 
-                                None => {}
-                                Some(push_ref) => {
+                            match self.belt_source(*straight_id) { None => {} Some(push_ref) => {
 
-                                    if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
+                                if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
 
-                                    new_port.source = Some(push_ref);
+                                match push_ref {
+
+                                    PushRef::PORT(port_id) => { self.ports.get_mut(&port_id).unwrap().destination = Some(PullRef::PORT(new_id)); }
+                                    PushRef::MERGER(merger_id) => {
+
+                                        let merger: &mut Merger = self.mergers.get_mut(&merger_id).unwrap();
+
+                                        merger.destination = Some(PullRef::PORT(new_id));
+                                    }
+                                    PushRef::SPLITTER(splitter_id, ref part) => {
+
+                                        let splitter: &mut Splitter = self.splitters.get_mut(&splitter_id).unwrap();
+
+                                        match part {
+
+                                            DualBeltPart::FIRST => { splitter.destination1 = Some(PullRef::PORT(new_id)); }
+                                            DualBeltPart::SECOND => { splitter.destination2 = Some(PullRef::PORT(new_id)); }
+                                        }
+                                    }
                                 }
-                            }
+
+                                new_port.source = Some(push_ref);
+                            } }
                         }
 
                         _ => {}
