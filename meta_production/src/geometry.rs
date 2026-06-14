@@ -1,7 +1,7 @@
 #[derive(Clone, Hash, Eq, PartialEq)]
 pub struct Point {
-    x: i32,
-    y: i32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
 }
 impl Point {
 

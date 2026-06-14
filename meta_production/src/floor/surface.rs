@@ -91,11 +91,21 @@ pub(crate) struct Port {
 
     pub product_id: u64,
     pub quantity: f64,
+
+    pub direction: PortDirection,
+}
+
+pub enum PortDirection {
+
+    CLOSED,
+    INPUT,
+    OUTPUT,
+    DUAL,
 }
 impl Port {
 
     fn new(position: Point) -> Self {
 
-        Port { position, product_id: 0, quantity: 0.0 }
+        Port { position, product_id: 0, quantity: 0.0, direction: PortDirection::CLOSED }
     }
 }
