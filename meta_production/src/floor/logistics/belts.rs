@@ -111,6 +111,25 @@ impl NetComponent {
 
     }
 
+    fn unlink(
+        &self,
+
+        (ports, straights, splitters, mergers, edges): BuildingsMut<'_>,
+
+        direction: Direction,
+
+    ) {
+
+        match self {
+
+            NetComponent::PORT(id) => { ports.get_mut(&id).unwrap().unlink(direction); }
+            NetComponent::MERGER(id) => { mergers.get_mut(&id).unwrap().unlink(direction); }
+            NetComponent::SPLITTER(id) => { splitters.get_mut(&id).unwrap().unlink(direction); }
+            NetComponent::STRAIGHT(id) => { straights.get_mut(&id).unwrap().unlink(edges, direction); }
+        }
+
+    }
+
     fn direction_to_io(
         &self,
 
@@ -192,12 +211,13 @@ impl StraightBelt {
         }
     }
 
-    // When removing a belt, the removal script with mutable access to the entire structure will create a new StraightEdge to propagate up the output direction while the input direction uses the old one.
+    // When removing a belt in between two others, the removal script with mutable access to the entire structure will create a new StraightEdge to propagate up the output direction while the input direction uses the old one.
     fn unlink(&mut self, edges: &mut HashMap<u64, StraightEdge>, direction: Direction) {
 
         if direction == self.input.direction {
 
             self.input.adjacent = None;
+            edges.get_mut(&self.edge).unwrap().source = None
         }
 
         if direction == self.output.direction {
@@ -360,6 +380,7 @@ impl Merger {
 enum BeltNetGoof {
 
     CollisionOnPlacement,
+    NoBuildingToRemove,
 }
 
 impl BeltNet {
@@ -475,7 +496,7 @@ impl BeltNet {
                 input_edge.destination = new_output;
 
                 // Traverses down the belt chain updating belts with the new, merged edge.
-                let mut belt_iterator = output_edge_id;
+                let mut belt_iterator = output_id;
                 loop {
 
                     belt_iterator = match self.straights.get_mut(&belt_iterator).unwrap().update_edge(input_edge_id) { Some(NetComponent::STRAIGHT(next_id)) => next_id, _ => break }
@@ -614,6 +635,76 @@ impl BeltNet {
         }
 
         None
+    }
+
+    fn remove(&mut self, position: &Point) -> Option<BeltNetGoof> {
+
+        match self.positions.remove(position) {
+
+            None => return Some(BeltNetGoof::NoBuildingToRemove),
+
+            Some(NetComponent::PORT(port_id)) => self.remove_port(port_id),
+            Some(NetComponent::STRAIGHT(straight_id)) => self.remove_straight(straight_id),
+            Some(NetComponent::SPLITTER(splitter_id)) => self.remove_splitter(splitter_id),
+            Some(NetComponent::MERGER(merger_id)) => self.remove_merger(merger_id),
+        };
+
+        return None
+    }
+
+    fn remove_port(&mut self, mut id: u64) {
+        id = self.ports_by_surface_id.remove(&id).unwrap();
+
+        match self.ports.get(&id).unwrap().io {
+            Some((BeltComponent { direction, adjacent: Some((net_component, _)) }, _)) => net_component.unlink(self.buildings_mut(), direction.opposite()),
+            _ => {},
+        }
+
+        self.ports.remove(&id);
+    }
+
+    fn remove_straight(&mut self, id: u64) {
+
+        let straight = self.straights.remove(&id).unwrap();
+
+        if let Some((input_net_component, _)) = straight.input.adjacent { input_net_component.unlink(self.buildings_mut(), straight.input.direction); }
+        if let Some((output_net_component, _)) = straight.output.adjacent { output_net_component.unlink(self.buildings_mut(), straight.output.direction); }
+
+        // splits the two edges and updates down the output side with the belt's new edge.
+        if let (
+            Some((NetComponent::STRAIGHT(_), _)),
+            Some((NetComponent::STRAIGHT(output_straight_id), _)),
+
+            ) = (straight.input.adjacent, straight.output.adjacent) {
+
+            let new_edge_id = self.new_component_id();
+            let new_edge = StraightEdge { source: None, destination: self.edges.get(&straight.edge).unwrap().destination };
+            self.edges.insert(new_edge_id, new_edge);
+
+            let mut belt_iterator = output_straight_id;
+            loop {
+
+                belt_iterator = match self.straights.get_mut(&belt_iterator).unwrap().update_edge(new_edge_id) { Some(NetComponent::STRAIGHT(next_straight_id)) => next_straight_id, _ => break, };
+            }
+        }
+    }
+
+    fn remove_splitter(&mut self, id: u64) {
+
+        let splitter = self.splitters.remove(&id).unwrap();
+
+        if let Some((input_net_component, _)) = splitter.input.adjacent { input_net_component.unlink(self.buildings_mut(), splitter.input.direction); }
+        if let Some((output1_net_component, _)) = splitter.output1.adjacent { output1_net_component.unlink(self.buildings_mut(), splitter.output1.direction); }
+        if let Some((output2_net_component, _)) = splitter.output2.adjacent { output2_net_component.unlink(self.buildings_mut(), splitter.output2.direction); }
+    }
+
+    fn remove_merger(&mut self, id: u64) {
+
+        let merger = self.mergers.remove(&id).unwrap();
+
+        if let Some((input1_net_component, _)) = merger.input1.adjacent { input1_net_component.unlink(self.buildings_mut(), merger.input1.direction); }
+        if let Some((input2_net_component, _)) = merger.input2.adjacent { input2_net_component.unlink(self.buildings_mut(), merger.input2.direction); }
+        if let Some((output_net_component, _)) = merger.output.adjacent { output_net_component.unlink(self.buildings_mut(), merger.output.direction); }
     }
 }
 
