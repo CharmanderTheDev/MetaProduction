@@ -1,4 +1,3 @@
-use std::cmp::PartialEq;
 use std::collections::HashMap;
 use crate::floor::Direction;
 use crate::floor::surface::Port;
@@ -14,157 +13,118 @@ pub struct BeltNet {
     splitters: HashMap<u64, Splitter>,
     mergers: HashMap<u64, Merger>,
 
+    edges: HashMap<u64, StraightEdge>,
+
     ports_by_surface_id: HashMap<u64, u64>, // Essentially a translation from port IDs as defined by the surface to BeltPort IDs as defined here
 
     next_component_id: u64,
     positions: HashMap<Point, NetComponent>,
 }
 
-enum NetComponent {
+type Buildings<'a> = (&'a HashMap<u64, BeltPort>, &'a HashMap<u64, StraightBelt>, &'a HashMap<u64, Splitter>, &'a HashMap<u64, Merger>, &'a HashMap<u64, StraightEdge>);
+type BuildingsMut<'a> = (&'a mut HashMap<u64, BeltPort>, &'a mut HashMap<u64, StraightBelt>, &'a mut HashMap<u64, Splitter>, &'a mut HashMap<u64, Merger>, &'a mut HashMap<u64, StraightEdge>);
 
-    PORT(u64),
-    STRAIGHT(u64),
-    SPLITTER(u64),
-    MERGER(u64),
-}
+struct BeltComponent {
 
-
-// Refers to the first or second part of the dual section of a belt component. For example, the first/second input of a merger.
-enum DualBeltPart {
-
-    FIRST,
-    SECOND,
-}
-
-
-// More general, used to categorize a side of a belt.
-enum BeltPart {
-
-    INPUT1,
-    OUTPUT1,
-    INPUT2,
-    OUTPUT2,
-    NONE,
-}
-
-impl BeltPart {
-
-    fn to_dual_belt_part(&self) -> Option<DualBeltPart> {
-
-        match self {
-
-            BeltPart::INPUT1 => Some(DualBeltPart::FIRST),
-            BeltPart::OUTPUT1 => Some(DualBeltPart::FIRST),
-            BeltPart::INPUT2 => Some(DualBeltPart::SECOND),
-            BeltPart::OUTPUT2 => Some(DualBeltPart::SECOND),
-            _ => None,
-        }
-    }
+    direction: Direction,
+    adjacent: Option<(NetComponent, BeltIOPart)>,
 }
 
 struct Buffer {
 
-    product_id: u64,
-
     quantity: f64,
-    next_quantity: f64,
+    product_id: u64,
 }
 
-struct Connection {
+#[derive(Clone, Copy)]
+enum BeltIOPart {
 
-    direction: Direction,
-    link: Option<(NetComponent, BeltPart)>, // The BeltPart segment encodes which part of the referenced NetComponent this Connection links to.
+    NONE,
+    INPUT1,
+    INPUT2,
+    OUTPUT1,
+    OUTPUT2,
 }
 
-struct StraightBelt {
+impl BeltIOPart {
 
-    position: Point,
+    fn opposite(&self) -> BeltIOPart {
 
-    from: Connection,
-    to: Connection,
-}
+        match self {
 
-impl StraightBelt {
+            BeltIOPart::NONE => BeltIOPart::NONE,
+            BeltIOPart::INPUT1 => BeltIOPart::OUTPUT1,
+            BeltIOPart::INPUT2 => BeltIOPart::OUTPUT2,
+            BeltIOPart::OUTPUT1 => BeltIOPart::INPUT1,
+            BeltIOPart::OUTPUT2 => BeltIOPart::INPUT2,
+        }
+    }
 
-    fn direction_to_part(&self, direction: Direction) -> BeltPart {
+    fn reduce(&self) -> BeltIOPart {
 
-        if direction == self.from.direction { return BeltPart::INPUT1; }
-        if direction == self.to.direction { return BeltPart::OUTPUT1; }
+        match self {
 
-        return BeltPart::NONE;
+            BeltIOPart::NONE => BeltIOPart::NONE,
+            BeltIOPart::INPUT1 | BeltIOPart::INPUT2 => BeltIOPart::INPUT1,
+            BeltIOPart::OUTPUT1 | BeltIOPart::OUTPUT2 => BeltIOPart::OUTPUT1,
+        }
     }
 }
 
-struct Splitter {
+enum Priority {
 
-    // Realspace
-
-    buffer1: Buffer,
-    buffer2: Buffer,
-
-    position: Point,
-
-    from: Connection,
-
-    to1: Connection,
-    to2: Connection,
-
-    priority: Option<DualBeltPart>,
-
-    // Straight section reduction
-
-    source: Option<PushRef>,
-
-    destination1: Option<PullRef>,
-    destination2: Option<PullRef>,
+    NONE,
+    FIRST,
+    SECOND,
 }
 
-impl Splitter {
+#[derive(Clone, Copy)]
+enum NetComponent {
 
-    // "what component of yours corresponds to this direction"
-    fn direction_to_part(&self, direction: Direction) -> BeltPart {
+    PORT(u64),
+    STRAIGHT(u64),
+    MERGER(u64),
+    SPLITTER(u64),
+}
 
-        if direction == self.from.direction { return BeltPart::INPUT1; }
-        if direction == self.to1.direction { return BeltPart::OUTPUT1; }
-        if direction == self.to2.direction { return BeltPart::INPUT2; }
+impl NetComponent {
 
-        BeltPart::NONE
+    fn link(
+        &self,
+
+        (ports, straights, splitters, mergers, edges): BuildingsMut<'_>,
+
+        component: NetComponent,
+        belt_part: BeltIOPart,
+        direction: Direction,
+
+    ) {
+
+        match self {
+
+            NetComponent::PORT(id) => { ports.get_mut(&id).unwrap().link(component, belt_part, direction); }
+            NetComponent::MERGER(id) => { mergers.get_mut(&id).unwrap().link(component, belt_part, direction); }
+            NetComponent::SPLITTER(id) => { splitters.get_mut(&id).unwrap().link(component, belt_part, direction); }
+            NetComponent::STRAIGHT(id) => { straights.get_mut(&id).unwrap().link(edges, component, belt_part, direction); }
+        }
+
     }
-}
 
-struct Merger {
+    fn direction_to_io(
+        &self,
 
-    // Realspace
+        (ports, straights, splitters, mergers, _): Buildings<'_>,
 
-    buffer: Buffer,
+        direction: Direction,
+    ) -> BeltIOPart{
 
-    position: Point,
+        match self {
 
-    from1: Connection,
-    from2: Connection,
-
-    to: Connection,
-
-    priority: Option<DualBeltPart>,
-
-    //  Straight section reduction
-
-    source1: Option<PushRef>,
-    source2: Option<PushRef>,
-
-    destination: Option<PullRef>,
-}
-
-impl Merger {
-
-    // "what component of yours corresponds to this direction"
-    fn direction_to_part(&self, direction: Direction) -> BeltPart {
-
-        if direction == self.from1.direction { return BeltPart::INPUT1; }
-        if direction == self.from2.direction { return BeltPart::INPUT2; }
-        if direction == self.to.direction { return BeltPart::OUTPUT1; }
-
-        BeltPart::NONE
+            NetComponent::PORT(id) => { ports.get(id).unwrap().direction_to_io(direction) }
+            NetComponent::MERGER(id) => { mergers.get(id).unwrap().direction_to_io(direction) }
+            NetComponent::SPLITTER(id) => { splitters.get(id).unwrap().direction_to_io(direction) }
+            NetComponent::STRAIGHT(id) => { straights.get(id).unwrap().direction_to_io(direction) }
+        }
     }
 }
 
@@ -172,271 +132,397 @@ struct BeltPort {
 
     surface_id: u64,
 
-    source: Option<PushRef>,
-
-    destination: Option<PullRef>,
+    io: Option<(BeltComponent, BeltIOPart)>,
 }
 
-enum PushRef {
+impl BeltPort {
 
-    SPLITTER(u64, DualBeltPart),
-    MERGER(u64),
-    PORT(u64),
+    fn link(&mut self, component: NetComponent, belt_part: BeltIOPart, direction: Direction) {
+
+        if let Some(_) = self.io { return; }
+
+        // belt_part.opposite().reduce() serves to tell the port whether it is giving or receiving product based on what it is now linked to.
+        self.io = Some((BeltComponent { direction, adjacent: Some((component, belt_part)) }, belt_part.opposite().reduce()));
+    }
+
+    fn unlink(&mut self, direction: Direction) {
+
+        let belt_component: &mut BeltComponent = match &mut self.io { Some((belt_component, _)) => belt_component, None => return };
+
+        if belt_component.direction == direction { self.io = None; }
+    }
+
+    fn direction_to_io(&self, direction: Direction) -> BeltIOPart {
+
+        match &self.io { Some((belt_component, belt_io_part)) => if belt_component.direction == direction { *belt_io_part } else { BeltIOPart::NONE }, None => BeltIOPart::NONE }
+    }
 }
 
-enum PullRef {
+struct StraightBelt {
 
-    SPLITTER(u64),
-    MERGER(u64, DualBeltPart),
-    PORT(u64),
+    input: BeltComponent,
+    output: BeltComponent,
+
+    edge: u64,
 }
 
-enum BeltOopsie {
+struct StraightEdge {
+
+    source: Option<(NetComponent, BeltIOPart)>,
+    destination: Option<(NetComponent, BeltIOPart)>,
+}
+
+impl StraightBelt {
+
+    fn link(&mut self, edges: &mut HashMap<u64, StraightEdge>, component: NetComponent, belt_part: BeltIOPart, direction: Direction) {
+
+        if direction == self.input.direction { // Assigning to both our adjacent and our corresponding edge
+
+            self.input.adjacent = Some((component, belt_part));
+            edges.get_mut(&self.edge).unwrap().source = Some((component, belt_part));
+            return;
+        }
+
+        if direction == self.output.direction {
+
+            self.output.adjacent = Some((component, belt_part));
+            edges.get_mut(&self.edge).unwrap().source = Some((component, belt_part));
+            return;
+        }
+    }
+
+    // When removing a belt, the removal script with mutable access to the entire structure will create a new StraightEdge to propagate up the output direction while the input direction uses the old one.
+    fn unlink(&mut self, edges: &mut HashMap<u64, StraightEdge>, direction: Direction) {
+
+        if direction == self.input.direction {
+
+            self.input.adjacent = None;
+        }
+
+        if direction == self.output.direction {
+
+            self.output.adjacent = None;
+            edges.get_mut(&self.edge).unwrap().destination = None;
+        }
+    }
+
+    // Useful in propagating a new edge through output
+    fn update_edge(&mut self, edge: u64) -> Option<NetComponent> {
+
+        self.edge = edge;
+
+        match self.output.adjacent { None => None, Some((net_component, _)) => Some(net_component) }
+    }
+
+    fn direction_to_io(&self, direction: Direction) -> BeltIOPart {
+
+        if direction == self.input.direction { return BeltIOPart::INPUT1 }
+        if direction == self.output.direction { return BeltIOPart::OUTPUT1 }
+
+        BeltIOPart::NONE
+    }
+}
+
+struct Splitter {
+
+    input: BeltComponent,
+
+    output1: BeltComponent,
+    output2: BeltComponent,
+
+    buffer: Buffer,
+
+    priority: Priority
+}
+
+impl Splitter {
+
+    fn link(&mut self, component: NetComponent, belt_part: BeltIOPart, direction: Direction) {
+
+        if direction == self.input.direction {
+
+            self.input.adjacent = Some((component, belt_part));
+            return;
+        }
+
+        if direction == self.output1.direction {
+
+            self.output1.adjacent = Some((component, belt_part));
+            return;
+        }
+
+        if direction == self.output2.direction {
+
+            self.output2.adjacent = Some((component, belt_part));
+            return;
+        }
+    }
+
+    fn unlink(&mut self, direction: Direction) {
+
+        if direction == self.input.direction {
+
+            self.input.adjacent = None;
+            return;
+        }
+
+        if direction == self.output1.direction {
+
+            self.output1.adjacent = None;
+            return;
+        }
+
+        if direction == self.output2.direction {
+
+            self.output2.adjacent = None;
+            return;
+        }
+    }
+
+    fn direction_to_io(&self, direction: Direction) -> BeltIOPart {
+
+        if direction == self.input.direction { return BeltIOPart::INPUT1 }
+        if direction == self.output1.direction { return BeltIOPart::OUTPUT1 }
+        if direction == self.output2.direction { return BeltIOPart::OUTPUT2 }
+
+        BeltIOPart::NONE
+    }
+}
+
+struct Merger {
+
+    input1: BeltComponent,
+    input2: BeltComponent,
+
+    buffer1: Buffer,
+    buffer2: Buffer,
+
+    output: BeltComponent,
+
+    priority: Priority,
+}
+
+impl Merger {
+
+    fn link(&mut self, component: NetComponent, belt_part: BeltIOPart, direction: Direction) {
+
+        if direction == self.input1.direction {
+
+            self.input1.adjacent = Some((component, belt_part));
+            return;
+        }
+
+        if direction == self.input2.direction {
+
+            self.input2.adjacent = Some((component, belt_part));
+            return;
+        }
+
+        if direction == self.output.direction {
+
+            self.output.adjacent = Some((component, belt_part));
+            return;
+        }
+    }
+
+    fn unlink(&mut self, direction: Direction) {
+
+        if direction == self.input1.direction {
+
+            self.input1.adjacent = None;
+            return;
+        }
+
+        if direction == self.input2.direction {
+
+            self.input2.adjacent = None;
+            return;
+        }
+
+        if direction == self.output.direction {
+
+            self.output.adjacent = None;
+            return;
+        }
+    }
+
+    fn direction_to_io(&self, direction: Direction) -> BeltIOPart {
+
+        if direction == self.input1.direction { return BeltIOPart::INPUT1 }
+        if direction == self.input2.direction { return BeltIOPart::INPUT2 }
+        if direction == self.output.direction { return BeltIOPart::OUTPUT1 }
+
+        BeltIOPart::NONE
+    }
+}
+
+enum BeltNetGoof {
 
     CollisionOnPlacement,
-    BadPortSurfaceID,
-    PortConnectionOverload,
-
 }
 
 impl BeltNet {
-    fn set_throughput(&mut self, throughput: f64) {
-        self.global_throughput = throughput;
+
+    fn buildings(&self) -> Buildings {
+
+        (&self.ports, &self.straights, &self.splitters, &self.mergers, &self.edges)
+    }
+
+    fn buildings_mut(&mut self) -> BuildingsMut {
+
+        (&mut self.ports, &mut self.straights, &mut self.splitters, &mut self.mergers, &mut self.edges)
     }
 
     fn new_component_id(&mut self) -> u64 {
+
         self.next_component_id += 1;
         self.next_component_id - 1
     }
 
-    fn belt_source(&self, belt: u64) -> Option<PushRef> {
-        let belt_struct: &StraightBelt = self.straights.get(&belt).unwrap();
+    fn add_port(&mut self, surface_id: u64, position: Point) -> Option<BeltNetGoof>{
 
-        match &belt_struct.from.link {
-            None => None,
-            Some((net_component, belt_part)) => {
-                match net_component {
-                    NetComponent::PORT(port_id) => { Some(PushRef::PORT(*port_id)) }
-                    NetComponent::MERGER(merger_id) => { Some(PushRef::MERGER(*merger_id)) }
-                    NetComponent::SPLITTER(splitter_id) => { Some(PushRef::SPLITTER(*splitter_id, belt_part.to_dual_belt_part()?)) }
-                    NetComponent::STRAIGHT(straight_id) => { self.belt_source(*straight_id) }
-                }
-            }
-        }
-    }
+        if let Some(_) = self.positions.get(&position) { return Some(BeltNetGoof::CollisionOnPlacement) }
 
-    fn belt_destination(&self, belt: u64) -> Option<PullRef> {
-        let belt_struct: &StraightBelt = self.straights.get(&belt).unwrap();
+        let new_id = self.new_component_id();
+        self.positions.insert(position.clone(), NetComponent::PORT(new_id));
+        self.ports_by_surface_id.insert(surface_id, new_id);
 
-        match &belt_struct.to.link {
-            None => None,
-            Some((net_component, belt_part)) => {
-                match net_component {
-                    NetComponent::PORT(port_id) => { Some(PullRef::PORT(*port_id)) }
-                    NetComponent::MERGER(merger_id) => { Some(PullRef::MERGER(*merger_id, belt_part.to_dual_belt_part()?)) }
-                    NetComponent::SPLITTER(splitter_id) => { Some(PullRef::SPLITTER(*splitter_id)) }
-                    NetComponent::STRAIGHT(straight_id) => { self.belt_destination(*straight_id) }
-                }
-            }
-        }
-    }
+        let mut new_port: BeltPort = BeltPort { surface_id, io: None };
 
-    fn add_port(&mut self, port_ids: &HashMap<u64, Port>, port: u64) -> Result<(), BeltOopsie> {
-
-        // Error checking
-        let port_ref: &Port = match port_ids.get(&port) {
-            Some(p) => p,
-            None => return Err(BeltOopsie::BadPortSurfaceID)
-        };
-        if self.positions.get(&port_ref.position).is_some() { return Err(BeltOopsie::CollisionOnPlacement) }
-
-        // Placing into world
-        let new_id: u64 = self.new_component_id();
-
-        let mut new_port: BeltPort = BeltPort { surface_id: port, source: None, destination: None };
-
-        self.positions.insert(port_ref.position.clone(), NetComponent::PORT(new_id));
-        self.ports_by_surface_id.insert(port, new_id);
-
-        // Establishing connections
         for direction in Direction::enumerate() {
-            let neighbor: &NetComponent = match self.positions.get(&add_points(&port_ref.position, &direction.delta())) {
-                None => { continue; }
-                Some(n) => n,
+            let neighbor = match self.positions.get(&add_points(&position, &direction.delta())) {
+                None => continue,
+                Some(n) => n.clone()
             };
 
-            match neighbor {
+            new_port.link(neighbor.clone(), neighbor.direction_to_io(self.buildings(), direction.opposite()), direction);
 
-                NetComponent::PORT(_) => {}
+            neighbor.link(self.buildings_mut(), NetComponent::PORT(new_id), new_port.direction_to_io(direction), direction.opposite());
+        }
 
-                NetComponent::SPLITTER(splitter_id) => {
+        self.ports.insert(new_id, new_port);
 
-                    let splitter: &mut Splitter = self.splitters.get_mut(splitter_id).unwrap();
+        None
+    }
 
-                    match splitter.direction_to_part(direction.opposite()) {
+    // This one is significantly larger to deal with straight belt -> edge optimization
+    fn add_straight(&mut self, mut straight: StraightBelt, position: Point) -> Option<BeltNetGoof> {
 
-                        BeltPart::INPUT1 => {
+        if let Some(_) = self.positions.get(&position) { return Some(BeltNetGoof::CollisionOnPlacement) }
 
-                            if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
+        let new_id = self.new_component_id();
+        self.positions.insert(position.clone(), NetComponent::STRAIGHT(new_id));
 
-                            new_port.destination = Some(PullRef::SPLITTER(*splitter_id));
+        let mut input_neighbor = self.positions.get(&add_points(&position, &straight.input.direction.delta())).cloned();
+        let mut output_neighbor = self.positions.get(&add_points(&position, &straight.output.direction.delta())).cloned();
 
-                            splitter.from.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1));
-                            splitter.source = Some(PushRef::PORT(new_id));
+        let input_component = match input_neighbor { None => BeltIOPart::NONE, Some(net_component) => net_component.direction_to_io(self.buildings(), straight.input.direction.opposite()) };
+        let output_component = match output_neighbor { None => BeltIOPart::NONE, Some(net_component) => net_component.direction_to_io(self.buildings(), straight.output.direction.opposite()) };
 
-                        }
+        // This block essentially says "if we are facing a part of our neighbor we cannot interface with, we consider there to be no neighbor at all"
+        input_neighbor = match input_component { BeltIOPart::INPUT1 | BeltIOPart::INPUT2 => None, _ => input_neighbor };
+        output_neighbor = match output_component { BeltIOPart::OUTPUT1 | BeltIOPart::OUTPUT2 => None, _ => output_neighbor };
 
-                        side @ (BeltPart::OUTPUT1 | BeltPart::OUTPUT2) => {
+        // Basic 2-way linkage between the belt and its neighbors
+        if let (Some(input_nc), _) = (input_neighbor, output_neighbor)
+        {
+            straight.input.adjacent = Some((input_nc, input_component));
+            input_nc.link(self.buildings_mut(), NetComponent::STRAIGHT(new_id), BeltIOPart::INPUT1, straight.input.direction.opposite());
+        }
 
-                            if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
+        if let (_, Some(output_nc)) = (input_neighbor, output_neighbor) {
 
-                            new_port.source = Some(PushRef::SPLITTER(*splitter_id, side.to_dual_belt_part().unwrap()));
+            straight.output.adjacent = Some((output_nc, output_component));
+            output_nc.link(self.buildings_mut(), NetComponent::STRAIGHT(new_id), BeltIOPart::OUTPUT1, straight.output.direction.opposite());
+        }
 
-                            match side {
+        // More advanced and specific cases to do with edges
+        match (input_neighbor, output_neighbor) {
 
-                                BeltPart::OUTPUT1 => {
+            // Case 0: no neighbors :(
+            (None, None) => {
 
-                                    splitter.to1.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
-                                    splitter.destination1 = Some(PullRef::PORT(new_id));
-                                }
+                let new_edge_id = self.new_component_id();
+                self.edges.insert(new_edge_id, StraightEdge { source: None, destination: None });
+                straight.edge = new_edge_id;
+            }
 
-                                BeltPart::OUTPUT2 => {
+            // Case 1: straight input and no output
+            (Some(NetComponent::STRAIGHT(input_id)), None) => {
 
-                                    splitter.to2.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
-                                    splitter.destination2 = Some(PullRef::PORT(new_id));
-                                }
+                straight.edge = self.straights.get(&input_id).unwrap().edge;
+            }
 
-                                _ => {}
-                            }
-                        }
+            // Case 2: no input and straight output
+            (None, Some(NetComponent::STRAIGHT(output_id))) => {
 
-                        _ => {} // If it's None we can leave the source and destination alone
-                    }
+                straight.edge = self.straights.get(&output_id).unwrap().edge;
+
+            }
+
+            // Case 3: straight input and output
+            (Some(NetComponent::STRAIGHT(input_id)), Some(NetComponent::STRAIGHT(output_id))) => {
+
+                let output_edge_id = self.straights.get(&output_id).unwrap().edge;
+                let new_output = self.edges.get(&output_edge_id).unwrap().destination;
+                self.edges.remove(&output_edge_id);
+
+                let input_edge_id = self.straights.get(&input_id).unwrap().edge;
+                let input_edge = self.edges.get_mut(&input_edge_id).unwrap();
+
+                input_edge.destination = new_output;
+
+                // Traverses down the belt chain updating belts with the new, merged edge.
+                let mut belt_iterator = output_edge_id;
+                loop {
+
+                    belt_iterator = match self.straights.get_mut(&belt_iterator).unwrap().update_edge(input_edge_id) { Some(NetComponent::STRAIGHT(next_id)) => next_id, _ => break }
                 }
 
-                NetComponent::MERGER(merger_id) => {
+            }
 
-                    let merger: &mut Merger = self.mergers.get_mut(merger_id).unwrap();
+            // Case 4: straight input and other output
+            (Some(NetComponent::STRAIGHT(input_id)), Some(other_output)) => {
 
-                    match merger.direction_to_part(direction.opposite()) {
+                let edge_id = self.straights.get(&input_id).unwrap().edge;
+                let edge = self.edges.get_mut(&edge_id).unwrap();
 
-                        side @ (BeltPart::INPUT1 | BeltPart::INPUT2) => {
+                edge.destination = Some((other_output, output_component));
 
-                            if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
+                straight.edge = edge_id;
+            }
 
-                            new_port.destination = Some(PullRef::MERGER(*merger_id, side.to_dual_belt_part().unwrap()));
+            // Case 5: other input and straight output
+            (Some(other_input), Some(NetComponent::STRAIGHT(output_id))) => {
 
-                            match side {
+                let edge_id = self.straights.get(&output_id).unwrap().edge;
+                let edge = self.edges.get_mut(&edge_id).unwrap();
 
-                                BeltPart::INPUT1 => {
+                edge.source = Some((other_input, input_component));
 
-                                    merger.from1.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1));
-                                    merger.source1 = Some(PushRef::PORT(new_id));
-                                }
+                straight.edge = edge_id;
+            }
 
-                                BeltPart::INPUT2 => {
+            // Final case: each side (input, output) is either a non-straight or a None. The outcome is completely generic at this point
+            (other_input @ _, other_output @ _) => {
 
-                                    merger.from2.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1));
-                                    merger.source2 = Some(PushRef::PORT(new_id));
-                                }
+                let new_edge_id = self.new_component_id();
 
-                                _ => {}
-                            }
-                        }
+                let new_edge = StraightEdge {
 
-                        BeltPart::OUTPUT1 => {
+                    source: match other_input { None => None, Some(input_nc) => Some((input_nc, input_component)) },
+                    destination: match other_output { None => None, Some(output_nc) => Some((output_nc, output_component)) },
+                };
 
-                            if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
-
-                            new_port.source = Some(PushRef::MERGER(*merger_id));
-
-                            merger.to.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
-                            merger.destination = Some(PullRef::PORT(new_id));
-                        }
-
-                        _ => {} // If it's None we can leave the source and destination alone
-                    }
-                }
-
-                NetComponent::STRAIGHT(straight_id) => {
-
-                    let straight: &mut StraightBelt = self.straights.get_mut(&straight_id).unwrap();
-
-                    match straight.direction_to_part(direction.opposite()) {
-
-                        BeltPart::INPUT1 => {
-
-                            straight.from.link = Some((NetComponent::PORT(new_id), BeltPart::OUTPUT1)); // Since we are adjacent to the belt, we attach with the from variable.
-
-                            match self.belt_destination(*straight_id) { None => {} Some(pull_ref) => {
-
-                                if new_port.destination.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
-
-                                match pull_ref { // Note that we never attach the from variable, as these components are not adjacent, but at the end of a belt chain.
-
-                                    PullRef::PORT(port_id) => { self.ports.get_mut(&port_id).unwrap().source = Some(PushRef::PORT(new_id)); }
-                                    PullRef::MERGER(merger_id, ref part) => {
-
-                                        let merger: &mut Merger = self.mergers.get_mut(&merger_id).unwrap();
-
-                                        match part {
-
-                                            DualBeltPart::FIRST => { merger.source1 = Some(PushRef::PORT(new_id)); }
-                                            DualBeltPart::SECOND => { merger.source2 = Some(PushRef::PORT(new_id)); }
-                                        }
-                                    }
-                                    PullRef::SPLITTER(splitter_id) => {
-
-                                        let splitter: &mut Splitter = self.splitters.get_mut(&splitter_id).unwrap();
-
-                                        splitter.source = Some(PushRef::PORT(new_id));
-                                    }
-                                }
-
-                                new_port.destination = Some(pull_ref);
-                            } }
-                        }
-
-                        BeltPart::OUTPUT1 => {
-
-                            straight.to.link = Some((NetComponent::PORT(new_id), BeltPart::INPUT1));
-
-                            match self.belt_source(*straight_id) { None => {} Some(push_ref) => {
-
-                                if new_port.source.is_some() { return Err(BeltOopsie::PortConnectionOverload); }
-
-                                match push_ref {
-
-                                    PushRef::PORT(port_id) => { self.ports.get_mut(&port_id).unwrap().destination = Some(PullRef::PORT(new_id)); }
-                                    PushRef::MERGER(merger_id) => {
-
-                                        let merger: &mut Merger = self.mergers.get_mut(&merger_id).unwrap();
-
-                                        merger.destination = Some(PullRef::PORT(new_id));
-                                    }
-                                    PushRef::SPLITTER(splitter_id, ref part) => {
-
-                                        let splitter: &mut Splitter = self.splitters.get_mut(&splitter_id).unwrap();
-
-                                        match part {
-
-                                            DualBeltPart::FIRST => { splitter.destination1 = Some(PullRef::PORT(new_id)); }
-                                            DualBeltPart::SECOND => { splitter.destination2 = Some(PullRef::PORT(new_id)); }
-                                        }
-                                    }
-                                }
-
-                                new_port.source = Some(push_ref);
-                            } }
-                        }
-
-                        _ => {}
-                    }
-                }
+                self.edges.insert(new_edge_id, new_edge);
+                straight.edge = new_edge_id;
             }
         }
 
+        self.straights.insert(new_id, straight);
 
-        Ok(())
+        None
     }
 }
+
+//In sim mode this network will benefit from further compilation. A flat Vec of objects pointing towards each-others indexes with zero overhead for insertion/deletion would speed up simulation significantly

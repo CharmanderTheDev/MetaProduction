@@ -4,7 +4,7 @@ mod machine;
 mod surface;
 mod logistics;
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 enum Direction {
     
     UP,
