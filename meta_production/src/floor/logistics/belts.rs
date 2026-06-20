@@ -1,5 +1,6 @@
+use std::cmp::PartialEq;
 use std::collections::HashMap;
-use crate::floor::Direction;
+use crate::geometry::Direction;
 use crate::floor::surface::Port;
 use crate::geometry::{add_points, Point};
 
@@ -36,7 +37,7 @@ struct Buffer {
     product_id: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum BeltIOPart {
 
     NONE,
@@ -390,7 +391,7 @@ impl BeltNet {
         let mut new_port: BeltPort = BeltPort { surface_id, io: None };
 
         for direction in Direction::enumerate() {
-            let neighbor = match self.positions.get(&add_points(&position, &direction.delta())) {
+            let neighbor = match self.positions.get(&position.add_delta(direction)) {
                 None => continue,
                 Some(n) => n.clone()
             };
@@ -413,27 +414,28 @@ impl BeltNet {
         let new_id = self.new_component_id();
         self.positions.insert(position.clone(), NetComponent::STRAIGHT(new_id));
 
-        let mut input_neighbor = self.positions.get(&add_points(&position, &straight.input.direction.delta())).cloned();
-        let mut output_neighbor = self.positions.get(&add_points(&position, &straight.output.direction.delta())).cloned();
+        let mut input_neighbor = self.positions.get(&position.add_delta(straight.input.direction)).cloned();
+        let mut output_neighbor = self.positions.get(&position.add_delta(straight.output.direction)).cloned();
 
         let input_component = match input_neighbor { None => BeltIOPart::NONE, Some(net_component) => net_component.direction_to_io(self.buildings(), straight.input.direction.opposite()) };
         let output_component = match output_neighbor { None => BeltIOPart::NONE, Some(net_component) => net_component.direction_to_io(self.buildings(), straight.output.direction.opposite()) };
 
         // This block essentially says "if we are facing a part of our neighbor we cannot interface with, we consider there to be no neighbor at all"
-        input_neighbor = match input_component { BeltIOPart::INPUT1 | BeltIOPart::INPUT2 => None, _ => input_neighbor };
-        output_neighbor = match output_component { BeltIOPart::OUTPUT1 | BeltIOPart::OUTPUT2 => None, _ => output_neighbor };
+        if input_component.reduce() != BeltIOPart::OUTPUT1 { input_neighbor = None; }
+        if output_component.reduce() != BeltIOPart::INPUT1 { output_neighbor = None; }
 
         // Basic 2-way linkage between the belt and its neighbors
-        if let (Some(input_nc), _) = (input_neighbor, output_neighbor)
+        let new_net_component = NetComponent::STRAIGHT(new_id);
+        if let Some(input_nc) = input_neighbor
         {
             straight.input.adjacent = Some((input_nc, input_component));
-            input_nc.link(self.buildings_mut(), NetComponent::STRAIGHT(new_id), BeltIOPart::INPUT1, straight.input.direction.opposite());
+            input_nc.link(self.buildings_mut(), new_net_component, BeltIOPart::INPUT1, straight.input.direction.opposite());
         }
 
-        if let (_, Some(output_nc)) = (input_neighbor, output_neighbor) {
+        if let Some(output_nc) = output_neighbor {
 
             straight.output.adjacent = Some((output_nc, output_component));
-            output_nc.link(self.buildings_mut(), NetComponent::STRAIGHT(new_id), BeltIOPart::OUTPUT1, straight.output.direction.opposite());
+            output_nc.link(self.buildings_mut(), new_net_component, BeltIOPart::OUTPUT1, straight.output.direction.opposite());
         }
 
         // More advanced and specific cases to do with edges
@@ -520,6 +522,96 @@ impl BeltNet {
         }
 
         self.straights.insert(new_id, straight);
+
+        None
+    }
+
+    fn add_splitter(&mut self, mut splitter: Splitter, position: Point) -> Option<BeltNetGoof> {
+
+        if self.positions.get(&position).is_some() { return Some(BeltNetGoof::CollisionOnPlacement); }
+
+        let new_id = self.new_component_id();
+
+        let input = self.positions.get(&position.add_delta(splitter.input.direction)).cloned();
+        let output1 = self.positions.get(&position.add_delta(splitter.output1.direction)).cloned();
+        let output2 = self.positions.get(&position.add_delta(splitter.output2.direction)).cloned();
+
+        let new_net_component = NetComponent::SPLITTER(new_id);
+
+        if let Some(input) = input {
+
+            let input_io_component = input.direction_to_io(self.buildings(), splitter.input.direction.opposite());
+            if input_io_component.reduce() == BeltIOPart::OUTPUT1 {
+
+                splitter.link(input, input_io_component, splitter.input.direction);
+                input.link(self.buildings_mut(), new_net_component, BeltIOPart::INPUT1, splitter.input.direction.opposite());
+            }
+        }
+
+        if let Some(output1) = output1 {
+
+            let output1_io_component = output1.direction_to_io(self.buildings(), splitter.output1.direction.opposite());
+            if output1_io_component.reduce() == BeltIOPart::INPUT1 {
+
+                splitter.link(output1, output1_io_component, splitter.output1.direction);
+                output1.link(self.buildings_mut(), new_net_component, BeltIOPart::OUTPUT1, splitter.output1.direction.opposite());
+            }
+        }
+
+        if let Some(output2) = output2 {
+
+            let output2_io_component = output2.direction_to_io(self.buildings(), splitter.output2.direction.opposite());
+            if output2_io_component.reduce() == BeltIOPart::INPUT1 {
+
+                splitter.link(output2, output2_io_component, splitter.output2.direction);
+                output2.link(self.buildings_mut(), new_net_component, BeltIOPart::OUTPUT2, splitter.output2.direction.opposite())
+            }
+        }
+
+        None
+    }
+
+    fn add_merger(&mut self, mut merger: Merger, position: Point) -> Option<BeltNetGoof> {
+
+        if self.positions.get(&position).is_some() { return Some(BeltNetGoof::CollisionOnPlacement); }
+
+        let new_id = self.new_component_id();
+
+        let input1 = self.positions.get(&position.add_delta(merger.input1.direction)).cloned();
+        let input2 = self.positions.get(&position.add_delta(merger.input2.direction)).cloned();
+        let output = self.positions.get(&position.add_delta(merger.output.direction)).cloned();
+
+        let new_net_component = NetComponent::SPLITTER(new_id);
+
+        if let Some(input1) = input1 {
+
+            let input_io_component = input1.direction_to_io(self.buildings(), merger.input1.direction.opposite());
+            if input_io_component.reduce() == BeltIOPart::OUTPUT1 {
+
+                merger.link(input1, input_io_component, merger.input1.direction);
+                input1.link(self.buildings_mut(), new_net_component, BeltIOPart::INPUT1, merger.input1.direction.opposite());
+            }
+        }
+
+        if let Some(input2) = input2 {
+
+            let output1_io_component = input2.direction_to_io(self.buildings(), merger.input2.direction.opposite());
+            if output1_io_component.reduce() == BeltIOPart::INPUT1 {
+
+                merger.link(input2, output1_io_component, merger.input2.direction);
+                input2.link(self.buildings_mut(), new_net_component, BeltIOPart::OUTPUT1, merger.input2.direction.opposite());
+            }
+        }
+
+        if let Some(output) = output {
+
+            let output2_io_component = output.direction_to_io(self.buildings(), merger.output.direction.opposite());
+            if output2_io_component.reduce() == BeltIOPart::INPUT1 {
+
+                merger.link(output, output2_io_component, merger.output.direction);
+                output.link(self.buildings_mut(), new_net_component, BeltIOPart::OUTPUT2, merger.output.direction.opposite())
+            }
+        }
 
         None
     }

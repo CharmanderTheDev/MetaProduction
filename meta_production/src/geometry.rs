@@ -10,6 +10,19 @@ impl Point {
         self.x += other.x;
         self.y += other.y;
     }
+
+    pub fn add_delta(&self, direction: Direction) -> Point {
+
+        add_points(
+            self,
+            match direction {
+                Direction::UP => &Point { x: 0, y: 1 },
+                Direction::DOWN => &Point { x: 0, y: -1 },
+                Direction::RIGHT => &Point { x: 1, y: 0 },
+                Direction::LEFT => &Point { x: -1, y: 0 },
+            },
+        )
+    }
 }
 
 pub fn add_points(a: &Point, b: &Point) -> Point {
@@ -82,4 +95,28 @@ pub fn spaces_intersect(a: &Space, b: &Space) -> bool {
     }
 
     false
+}
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum Direction {
+
+    UP,
+    DOWN,
+    LEFT,
+    RIGHT,
+}
+
+impl Direction {
+
+    pub(crate) fn opposite(&self) -> Direction {
+
+        match self {
+            Direction::UP => Direction::DOWN,
+            Direction::DOWN => Direction::UP,
+            Direction::RIGHT => Direction::LEFT,
+            Direction::LEFT => Direction::RIGHT,
+        }
+    }
+
+    pub(crate) fn enumerate() -> Vec<Direction> { vec![Direction::UP, Direction::DOWN, Direction::RIGHT, Direction::LEFT] }
 }
