@@ -1,5 +1,5 @@
 use std::cmp::PartialEq;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::geometry::Direction;
 use crate::floor::surface::Port;
 use crate::geometry::{add_points, Point};
@@ -16,7 +16,8 @@ pub struct BeltNet {
 
     edges: HashMap<u64, StraightEdge>,
 
-    ports_by_surface_id: HashMap<u64, u64>, // Essentially a translation from port IDs as defined by the surface to BeltPort IDs as defined here
+    surface_id_to_beltnet_id: HashMap<u64, u64>, // Tools to translate between port ids as defined by the surface to BeltPort ids as defined here
+    beltnet_id_to_surface_id: HashMap<u64, u64>,
 
     next_component_id: u64,
     positions: HashMap<Point, NetComponent>,
@@ -34,7 +35,49 @@ struct BeltComponent {
 struct Buffer {
 
     quantity: f64,
+    next_quantity: f64,
+
+    max_quantity: f64,
+
     product_id: u64,
+}
+
+impl Buffer {
+
+    // add as much as you can fit and return the remainder
+    fn add(&mut self, quantity: f64) -> f64 {
+
+        if self.max_quantity - self.quantity >= quantity { self.next_quantity += quantity; return 0.0; }
+
+        self.next_quantity = self.max_quantity;
+
+        quantity - (self.max_quantity - self.quantity) // The difference between how much was offered and how much extra space was left
+    }
+
+    // remove as much as you can and return the remainder
+    fn subtract(&mut self, quantity: f64) -> f64 {
+
+        if self.quantity >= quantity { self.next_quantity -= quantity; return 0.0; }
+
+        self.next_quantity = 0.0;
+        return quantity - self.quantity;
+    }
+
+    fn update(&mut self) {
+
+        self.quantity = self.next_quantity;
+        if(self.quantity == 0.0) { self.product_id = 0; }
+
+    }
+
+    fn clear(&mut self) {
+
+        self.quantity = 0.0;
+        self.next_quantity = 0.0;
+
+        self.product_id = 0;
+    }
+
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -145,6 +188,105 @@ impl NetComponent {
             NetComponent::SPLITTER(id) => { splitters.get(id).unwrap().direction_to_io(direction) }
             NetComponent::STRAIGHT(id) => { straights.get(id).unwrap().direction_to_io(direction) }
         }
+    }
+
+    fn clear(
+
+        &self,
+
+        (ports, straights, splitters, mergers, edges): BuildingsMut<'_>,
+
+        mut previously_visited: HashSet<u64>,
+    ) -> HashSet<u64> {
+
+        match self {
+
+            NetComponent::PORT(_) => { previously_visited },
+            NetComponent::MERGER(id) => {
+
+                if previously_visited.contains(&id) { return previously_visited; }
+
+                let merger = mergers.get_mut(id).unwrap();
+
+                let input1 = merger.input1.adjacent.clone();
+                let input2 = merger.input2.adjacent.clone();
+                let output = merger.output.adjacent.clone();
+
+                merger.buffer1.clear();
+                merger.buffer2.clear();
+
+                previously_visited.insert(*id);
+
+                if let Some((net_component, _)) = input1 { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+                if let Some((net_component, _)) = input2 { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+                if let Some((net_component, _)) = output { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+
+                previously_visited.remove(&id);
+                previously_visited
+            }
+            NetComponent::SPLITTER(id) => {
+
+                if previously_visited.contains(&id) { return previously_visited; }
+
+                let splitter = splitters.get_mut(id).unwrap();
+
+                let input = splitter.input.adjacent.clone();
+                let output1 = splitter.output1.adjacent.clone();
+                let output2 = splitter.output2.adjacent.clone();
+
+                splitter.buffer.clear();
+
+                previously_visited.insert(*id);
+
+                if let Some((net_component, _)) = input { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+                if let Some((net_component, _)) = output1 { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+                if let Some((net_component, _)) = output2 { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+
+                previously_visited.remove(&id);
+                previously_visited
+            }
+            NetComponent::STRAIGHT(id) => {
+
+                if previously_visited.contains(&id) { return previously_visited; }
+
+                let edge = edges.get_mut(&straights.get_mut(id).unwrap().edge).unwrap();
+                let (source, destination) = (edge.source, edge.destination);
+
+                previously_visited.insert(*id);
+
+                if let Some((net_component, _)) = source { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+                if let Some((net_component, _)) = destination { previously_visited = net_component.clear((ports, straights, splitters, mergers, edges), previously_visited); }
+
+                previously_visited.remove(&id);
+                previously_visited
+            }
+        }
+    }
+
+    // This is where the magic happens (finally written after like 850 lines of setup)
+    fn push(&self, (ports, straights, splitters, mergers, edges): BuildingsMut<'_>, surface_ports: &mut HashMap<u64, Port>) -> Option<BeltNetGoof> {
+
+        match self {
+
+            NetComponent::PORT(id) => {
+
+                todo!()
+            }
+
+            NetComponent::MERGER(id) => {
+
+                todo!()
+            }
+
+            NetComponent::SPLITTER(id) => {
+
+                todo!()
+            }
+
+            _ => {} // Straight belts dont push
+        }
+
+        None
     }
 }
 
@@ -381,6 +523,7 @@ enum BeltNetGoof {
 
     CollisionOnPlacement,
     NoBuildingToRemove,
+    ItemMixing,
 }
 
 impl BeltNet {
@@ -407,7 +550,9 @@ impl BeltNet {
 
         let new_id = self.new_component_id();
         self.positions.insert(position.clone(), NetComponent::PORT(new_id));
-        self.ports_by_surface_id.insert(surface_id, new_id);
+
+        self.surface_id_to_beltnet_id.insert(surface_id, new_id);
+        self.beltnet_id_to_surface_id.insert(new_id, surface_id);
 
         let mut new_port: BeltPort = BeltPort { surface_id, io: None };
 
@@ -551,6 +696,8 @@ impl BeltNet {
 
         if self.positions.get(&position).is_some() { return Some(BeltNetGoof::CollisionOnPlacement); }
 
+        splitter.buffer.max_quantity = 2.0 * self.global_throughput;
+
         let new_id = self.new_component_id();
 
         let input = self.positions.get(&position.add_delta(splitter.input.direction)).cloned();
@@ -595,6 +742,9 @@ impl BeltNet {
     fn add_merger(&mut self, mut merger: Merger, position: Point) -> Option<BeltNetGoof> {
 
         if self.positions.get(&position).is_some() { return Some(BeltNetGoof::CollisionOnPlacement); }
+
+        merger.buffer1.max_quantity = 2.0 * self.global_throughput;
+        merger.buffer2.max_quantity = 2.0 * self.global_throughput;
 
         let new_id = self.new_component_id();
 
@@ -653,13 +803,15 @@ impl BeltNet {
     }
 
     fn remove_port(&mut self, mut id: u64) {
-        id = self.ports_by_surface_id.remove(&id).unwrap();
+
+        id = self.surface_id_to_beltnet_id.remove(&id).unwrap();
 
         match self.ports.get(&id).unwrap().io {
             Some((BeltComponent { direction, adjacent: Some((net_component, _)) }, _)) => net_component.unlink(self.buildings_mut(), direction.opposite()),
             _ => {},
         }
 
+        self.beltnet_id_to_surface_id.remove(&id);
         self.ports.remove(&id);
     }
 
@@ -705,6 +857,34 @@ impl BeltNet {
         if let Some((input1_net_component, _)) = merger.input1.adjacent { input1_net_component.unlink(self.buildings_mut(), merger.input1.direction); }
         if let Some((input2_net_component, _)) = merger.input2.adjacent { input2_net_component.unlink(self.buildings_mut(), merger.input2.direction); }
         if let Some((output_net_component, _)) = merger.output.adjacent { output_net_component.unlink(self.buildings_mut(), merger.output.direction); }
+    }
+
+    // see the clear function, a highly aggressive recursive function that clears buffers across every belt accessible from the target in all directions. Will be useful to the player later.
+    fn clear_product(&mut self, position: &Point) {
+
+        if let Some(target) = self.positions.get_mut(position) { target.clone().clear(self.buildings_mut(), HashSet::new()); }
+    }
+
+    fn tick(&mut self, ports: &mut HashMap<u64, Port>) -> Option<BeltNetGoof> {
+
+        let mut item_mixing: bool = false;
+
+        for port_id in self.ports.keys().copied().collect::<Vec<u64>>() {
+
+            if let Some(BeltNetGoof::ItemMixing) = NetComponent::PORT(port_id).push(self.buildings_mut(), ports) { item_mixing = true; }
+        }
+
+        for splitter_id in self.splitters.keys().copied().collect::<Vec<u64>>() {
+
+            if let Some(BeltNetGoof::ItemMixing) = NetComponent::PORT(splitter_id).push(self.buildings_mut(), ports) { item_mixing = true; }
+        }
+
+        for merger_id in self.mergers.keys().copied().collect::<Vec<u64>>() {
+
+            if let Some(BeltNetGoof::ItemMixing) = NetComponent::PORT(merger_id).push(self.buildings_mut(), ports) { item_mixing = true; }
+        }
+
+        if item_mixing { Some(BeltNetGoof::ItemMixing) } else { None }
     }
 }
 

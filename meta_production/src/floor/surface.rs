@@ -47,7 +47,7 @@ impl Surface {
         );
         if(collides) { return Some(new_machine); }
 
-        let new_ports: Vec<Point> =
+        let new_ports: Vec<(Point, f64)> =
             new_machine.recipe.init(new_machine.space.top_left());
 
         let mut new_port_ids: Vec<u64> = vec![];
@@ -58,7 +58,7 @@ impl Surface {
             new_port_ids.push(new_port_id);
 
             self.port_ids.insert(new_port_id, Port::new(port.clone()));
-            self.port_map.insert(port, new_port_id);
+            self.port_map.insert(port.0, new_port_id);
         }
 
         new_machine.recipe.give_ports(new_port_ids);
@@ -91,12 +91,14 @@ pub(crate) struct Port {
 
     pub product_id: u64,
     pub quantity: f64,
+
+    pub max_quantity: f64,
 }
 
 impl Port {
 
-    fn new(position: Point) -> Self {
+    fn new((position, max_quantity): (Point, f64)) -> Self {
 
-        Port { position, product_id: 0, quantity: 0.0 }
+        Port { position, product_id: 0, quantity: 0.0, max_quantity }
     }
 }
