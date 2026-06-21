@@ -89,16 +89,56 @@ pub(crate) struct Port {
 
     pub position: Point,
 
-    pub product_id: u64,
-    pub quantity: f64,
-
-    pub max_quantity: f64,
+    pub buffer: Buffer,
 }
 
 impl Port {
 
     fn new((position, max_quantity): (Point, f64)) -> Self {
 
-        Port { position, product_id: 0, quantity: 0.0, max_quantity }
+        Port { position, buffer: Buffer { quantity: 0.0, next_quantity: 0.0, max_quantity, product_id: 0 }}
     }
+}
+
+pub struct Buffer {
+
+    pub quantity: f64,
+    pub next_quantity: f64,
+
+    pub max_quantity: f64,
+
+    pub product_id: u64,
+}
+
+// returns amount transferred, or None if item mixing occurred
+pub fn buffer_transfer(from: &mut Buffer, to: &mut Buffer, mut throughput: f64) -> Option<f64> {
+
+    if from.product_id != to.product_id { return None; }
+
+    throughput = if from.quantity >= throughput { throughput } else { from.quantity }; // Only take as much as we can
+    throughput = if to.max_quantity - to.quantity >= throughput { throughput } else { to.max_quantity - to.quantity }; // Only give as much as we can fit
+
+    from.next_quantity -= throughput;
+    to.next_quantity += throughput;
+
+    Some(throughput)
+}
+
+impl Buffer {
+
+    pub fn update(&mut self) {
+
+        self.quantity = self.next_quantity;
+        if(self.quantity == 0.0) { self.product_id = 0; }
+
+    }
+
+    pub(crate) fn clear(&mut self) {
+
+        self.quantity = 0.0;
+        self.next_quantity = 0.0;
+
+        self.product_id = 0;
+    }
+
 }

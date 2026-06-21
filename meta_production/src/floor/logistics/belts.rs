@@ -1,8 +1,8 @@
 use std::cmp::PartialEq;
 use std::collections::{HashMap, HashSet};
 use crate::geometry::Direction;
-use crate::floor::surface::Port;
-use crate::geometry::{add_points, Point};
+use crate::floor::surface::{buffer_transfer, Buffer, Port};
+use crate::geometry::Point;
 
 #[derive(Default)]
 pub struct BeltNet {
@@ -17,7 +17,6 @@ pub struct BeltNet {
     edges: HashMap<u64, StraightEdge>,
 
     surface_id_to_beltnet_id: HashMap<u64, u64>, // Tools to translate between port ids as defined by the surface to BeltPort ids as defined here
-    beltnet_id_to_surface_id: HashMap<u64, u64>,
 
     next_component_id: u64,
     positions: HashMap<Point, NetComponent>,
@@ -30,54 +29,6 @@ struct BeltComponent {
 
     direction: Direction,
     adjacent: Option<(NetComponent, BeltIOPart)>,
-}
-
-struct Buffer {
-
-    quantity: f64,
-    next_quantity: f64,
-
-    max_quantity: f64,
-
-    product_id: u64,
-}
-
-impl Buffer {
-
-    // add as much as you can fit and return the remainder
-    fn add(&mut self, quantity: f64) -> f64 {
-
-        if self.max_quantity - self.quantity >= quantity { self.next_quantity += quantity; return 0.0; }
-
-        self.next_quantity = self.max_quantity;
-
-        quantity - (self.max_quantity - self.quantity) // The difference between how much was offered and how much extra space was left
-    }
-
-    // remove as much as you can and return the remainder
-    fn subtract(&mut self, quantity: f64) -> f64 {
-
-        if self.quantity >= quantity { self.next_quantity -= quantity; return 0.0; }
-
-        self.next_quantity = 0.0;
-        return quantity - self.quantity;
-    }
-
-    fn update(&mut self) {
-
-        self.quantity = self.next_quantity;
-        if(self.quantity == 0.0) { self.product_id = 0; }
-
-    }
-
-    fn clear(&mut self) {
-
-        self.quantity = 0.0;
-        self.next_quantity = 0.0;
-
-        self.product_id = 0;
-    }
-
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -115,9 +66,9 @@ impl BeltIOPart {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
 enum Priority {
 
-    NONE,
     FIRST,
     SECOND,
 }
@@ -264,29 +215,232 @@ impl NetComponent {
     }
 
     // This is where the magic happens (finally written after like 850 lines of setup)
-    fn push(&self, (ports, straights, splitters, mergers, edges): BuildingsMut<'_>, surface_ports: &mut HashMap<u64, Port>) -> Option<BeltNetGoof> {
+    // To fulfill borrow rules, this function will temporarily assume ownership of the pushing object.
+    fn push(&self, global_throughput: f64, (ports, straights, splitters, mergers, edges): BuildingsMut<'_>, surface_ports: &mut HashMap<u64, Port>) -> Option<BeltNetGoof> {
+
+        let mut mixing: Option<BeltNetGoof> = None;
 
         match self {
 
             NetComponent::PORT(id) => {
 
-                todo!()
+                let port = ports.remove(id).unwrap();
+                let mut surface_port = surface_ports.remove(&port.surface_id).unwrap();
+
+                if let Some((BeltComponent { direction: _, adjacent: Some((adjacent_net_component, adjacent_part))}, BeltIOPart::OUTPUT1)) = port.io {
+
+                    if let Some(destination_buffer) = adjacent_net_component.get_buffer(adjacent_part, (ports, straights, splitters, mergers, edges), surface_ports) {
+
+                        if buffer_transfer(
+
+                            &mut surface_port.buffer,
+                            destination_buffer,
+                            global_throughput,
+                        ).is_none() { mixing = Some(BeltNetGoof::ItemMixing); }
+                    }
+                }
+
+                surface_ports.insert(port.surface_id, surface_port);
+                ports.insert(*id, port);
             }
 
             NetComponent::MERGER(id) => {
 
-                todo!()
+                let mut merger = mergers.remove(id).unwrap();
+
+                if let BeltComponent { direction: _, adjacent: Some((adjacent_net_component, adjacent_part))} = merger.output {
+
+                    if let Some(destination_buffer) = adjacent_net_component.get_buffer(adjacent_part, (ports, straights, splitters, mergers, edges), surface_ports) {
+
+                        match merger.priority {
+
+                            Priority::FIRST => {
+
+                                if let Some(throughput_used) = buffer_transfer(&mut merger.buffer1, destination_buffer, global_throughput) {
+
+                                    mixing = if buffer_transfer(&mut merger.buffer2, destination_buffer, global_throughput - throughput_used).is_none() { mixing } else { Some(BeltNetGoof::ItemMixing) };
+
+                                } else {
+
+                                    buffer_transfer(&mut merger.buffer2, destination_buffer, global_throughput);
+                                    mixing = Some(BeltNetGoof::ItemMixing);
+                                }
+                            },
+
+                            Priority::SECOND => {
+
+                                if let Some(throughput_used) = buffer_transfer(&mut merger.buffer2, destination_buffer, global_throughput) {
+
+                                    mixing = if buffer_transfer(&mut merger.buffer2, destination_buffer, global_throughput - throughput_used).is_none() { mixing } else { Some(BeltNetGoof::ItemMixing) };
+
+                                } else {
+
+                                    buffer_transfer(&mut merger.buffer2, destination_buffer, global_throughput);
+                                    mixing = Some(BeltNetGoof::ItemMixing);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                mergers.insert(*id, merger);
             }
 
             NetComponent::SPLITTER(id) => {
 
-                todo!()
+                let mut splitter = splitters.remove(id).unwrap();
+
+                let buffer1 = if let Some((adjacent_net_component, adjacent_part)) = splitter.output1.adjacent {
+
+                    adjacent_net_component.get_buffer(adjacent_part, (ports, straights, splitters, mergers, edges), surface_ports).is_some()
+
+                } else { false };
+
+                let buffer2 = if let Some((adjacent_net_component, adjacent_part)) = splitter.output2.adjacent {
+
+                    adjacent_net_component.get_buffer(adjacent_part, (ports, straights, splitters, mergers, edges), surface_ports).is_some()
+
+                } else { false };
+
+                match (buffer1, buffer2, splitter.priority.clone()) {
+
+                    (true, true, Priority::FIRST) => {
+
+                        let (adjacent_net_component_1, adjacent_part_1) = splitter.output1.adjacent.unwrap();
+
+                        if let Some(throughput_used) = buffer_transfer(
+                            &mut splitter.buffer,
+                            adjacent_net_component_1.get_buffer(adjacent_part_1, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                            global_throughput
+                        ) {
+
+                            let (adjacent_net_component_2, adjacent_part_2) = splitter.output2.adjacent.unwrap();
+                            mixing = if buffer_transfer(
+                                &mut splitter.buffer,
+                                adjacent_net_component_2.get_buffer(adjacent_part_2, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                global_throughput - throughput_used,
+                            ).is_none() { Some(BeltNetGoof::ItemMixing) } else { mixing };
+
+                        } else {
+
+                            let (adjacent_net_component_2, adjacent_part_2) = splitter.output2.adjacent.unwrap();
+                            buffer_transfer(
+                                &mut splitter.buffer,
+                                adjacent_net_component_2.get_buffer(adjacent_part_2, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                global_throughput,
+                            );
+                            mixing = Some(BeltNetGoof::ItemMixing);
+                        }
+                    }
+
+                    (true, true, Priority::SECOND) => {
+
+                        let (adjacent_net_component_2, adjacent_part_2) = splitter.output2.adjacent.unwrap();
+
+                        if let Some(throughput_used) = buffer_transfer(
+                            &mut splitter.buffer,
+                            adjacent_net_component_2.get_buffer(adjacent_part_2, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                            global_throughput
+                        ) {
+
+                            let (adjacent_net_component_1, adjacent_part_1) = splitter.output2.adjacent.unwrap();
+                            mixing = if buffer_transfer(
+                                &mut splitter.buffer,
+                                adjacent_net_component_1.get_buffer(adjacent_part_1, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                global_throughput - throughput_used,
+                            ).is_none() { Some(BeltNetGoof::ItemMixing) } else { mixing };
+
+                        } else {
+
+                            let (adjacent_net_component_1, adjacent_part_1) = splitter.output2.adjacent.unwrap();
+                            buffer_transfer(
+                                &mut splitter.buffer,
+                                adjacent_net_component_1.get_buffer(adjacent_part_1, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                global_throughput,
+                            );
+                            mixing = Some(BeltNetGoof::ItemMixing);
+                        }
+                    }
+
+                    (true, _, _) => {
+
+
+                        let (adjacent_net_component_1, adjacent_part_1) = splitter.output1.adjacent.unwrap();
+
+                        mixing = if buffer_transfer(
+                            &mut splitter.buffer,
+                            adjacent_net_component_1.get_buffer(adjacent_part_1, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                            global_throughput,
+                        ).is_none() { Some(BeltNetGoof::ItemMixing) } else { mixing };
+                    }
+
+                    (_, true, _) => {
+
+                        let (adjacent_net_component_2, adjacent_part_2) = splitter.output2.adjacent.unwrap();
+
+                        mixing = if buffer_transfer(
+                            &mut splitter.buffer,
+                            adjacent_net_component_2.get_buffer(adjacent_part_2, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                            global_throughput,
+                        ).is_none() { Some(BeltNetGoof::ItemMixing) } else { mixing };
+                    }
+
+                    _ => {}
+                }
+
+                splitters.insert(*id, splitter);
             }
 
             _ => {} // Straight belts dont push
         }
 
-        None
+        mixing
+    }
+
+    fn get_buffer<'a>(&self, part: BeltIOPart, (ports, straights, splitters, mergers, edges): BuildingsMut<'a>, surface_ports: &'a mut HashMap<u64, Port>) -> Option<&'a mut Buffer> {
+
+        match (self, part) {
+
+            (NetComponent::PORT(id), _) => { Some(&mut surface_ports.get_mut(&ports.get_mut(&id).unwrap().surface_id).unwrap().buffer) }
+            (NetComponent::MERGER(id), BeltIOPart::INPUT1) => { Some(&mut mergers.get_mut(&id).unwrap().buffer1) }
+            (NetComponent::MERGER(id), BeltIOPart::INPUT2) => { Some(&mut mergers.get_mut(&id).unwrap().buffer2) }
+            (NetComponent::SPLITTER(id), _) => { Some(&mut splitters.get_mut(&id).unwrap().buffer) }
+            (NetComponent::STRAIGHT(id), _) => {
+
+                if let Some((net_component, belt_io_part)) = edges.get_mut(&straights.get(&id).unwrap().edge).unwrap().destination {
+
+                    net_component.get_buffer(belt_io_part, (ports, straights, splitters, mergers, edges), surface_ports)
+
+                } else { None }
+            }
+
+            _ => panic!("Attempt to get a buffer in an invalid pushing context")
+        }
+    }
+
+    fn update(&self, (ports, _, splitters, mergers, _): BuildingsMut<'_>, surface_ports: &mut HashMap<u64, Port>) {
+
+        match self {
+
+            NetComponent::PORT(port_id) => {
+
+                surface_ports.get_mut(&ports.get(port_id).unwrap().surface_id).unwrap().buffer.update();
+            }
+
+            NetComponent::SPLITTER(splitter_id) => {
+
+                splitters.get_mut(&splitter_id).unwrap().buffer.update();
+            }
+
+            NetComponent::MERGER(merger_id) => {
+
+                let merger = mergers.get_mut(&merger_id).unwrap();
+                merger.buffer1.update();
+                merger.buffer2.update();
+            }
+
+            _ => {}
+        }
     }
 }
 
@@ -552,7 +706,6 @@ impl BeltNet {
         self.positions.insert(position.clone(), NetComponent::PORT(new_id));
 
         self.surface_id_to_beltnet_id.insert(surface_id, new_id);
-        self.beltnet_id_to_surface_id.insert(new_id, surface_id);
 
         let mut new_port: BeltPort = BeltPort { surface_id, io: None };
 
@@ -811,7 +964,6 @@ impl BeltNet {
             _ => {},
         }
 
-        self.beltnet_id_to_surface_id.remove(&id);
         self.ports.remove(&id);
     }
 
@@ -865,26 +1017,34 @@ impl BeltNet {
         if let Some(target) = self.positions.get_mut(position) { target.clone().clear(self.buildings_mut(), HashSet::new()); }
     }
 
+    // calculates its next state based on its current state
     fn tick(&mut self, ports: &mut HashMap<u64, Port>) -> Option<BeltNetGoof> {
 
         let mut item_mixing: bool = false;
 
-        for port_id in self.ports.keys().copied().collect::<Vec<u64>>() {
+        let net_components = std::mem::take(&mut self.positions);
 
-            if let Some(BeltNetGoof::ItemMixing) = NetComponent::PORT(port_id).push(self.buildings_mut(), ports) { item_mixing = true; }
+        for (_, net_component) in &net_components {
+
+            if let Some(BeltNetGoof::ItemMixing) = net_component.push(self.global_throughput, self.buildings_mut(), ports) { item_mixing = true; }
         }
 
-        for splitter_id in self.splitters.keys().copied().collect::<Vec<u64>>() {
-
-            if let Some(BeltNetGoof::ItemMixing) = NetComponent::PORT(splitter_id).push(self.buildings_mut(), ports) { item_mixing = true; }
-        }
-
-        for merger_id in self.mergers.keys().copied().collect::<Vec<u64>>() {
-
-            if let Some(BeltNetGoof::ItemMixing) = NetComponent::PORT(merger_id).push(self.buildings_mut(), ports) { item_mixing = true; }
-        }
+        self.positions = net_components;
 
         if item_mixing { Some(BeltNetGoof::ItemMixing) } else { None }
+    }
+
+    // switches its next state to its current state, resolving the tick.
+    fn update(&mut self, ports: &mut HashMap<u64, Port>) {
+
+        let net_components = std::mem::take(&mut self.positions);
+
+        for (_, net_component) in &net_components {
+
+            net_component.update(self.buildings_mut(), ports);
+        }
+
+        self.positions = net_components;
     }
 }
 
