@@ -182,4 +182,6 @@ impl Buffer {
             max_quantity,
         }
     }
+
+    pub fn remaining_space(&self) -> f64 { self.max_quantity - self.quantity }
 }

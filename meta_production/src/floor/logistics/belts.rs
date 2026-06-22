@@ -69,6 +69,7 @@ impl BeltIOPart {
 #[derive(Clone, Copy, PartialEq)]
 enum Priority {
 
+    NONE,
     FIRST,
     SECOND,
 }
@@ -254,6 +255,30 @@ impl NetComponent {
 
                         match merger.priority {
 
+                            Priority::NONE => {
+
+                                let throughput = (if global_throughput < destination_buffer.remaining_space() { global_throughput } else { destination_buffer.remaining_space() }) / 2.0;
+
+                                let remainder_1 = if let Some(throughput_used) = buffer_transfer(&mut merger.buffer1, destination_buffer, throughput) {
+                                    throughput - throughput_used
+                                } else { mixing = Some(BeltNetGoof::ItemMixing); throughput };
+
+                                let remainder_2 = if let Some(throughput_used) = buffer_transfer(&mut merger.buffer2, destination_buffer, throughput) {
+                                    throughput - throughput_used
+                                } else { mixing = Some(BeltNetGoof::ItemMixing); throughput };
+
+                                match (remainder_1, remainder_2) {
+
+                                    (0.0, 0.0) => { }
+
+                                    (0.0, _) => { buffer_transfer(&mut merger.buffer1, destination_buffer, remainder_2).unwrap(); }
+
+                                    (_, 0.0) => { buffer_transfer(&mut merger.buffer2, destination_buffer, remainder_1).unwrap(); }
+
+                                    _ => { }
+                                }
+                            }
+
                             Priority::FIRST => {
 
                                 if let Some(throughput_used) = buffer_transfer(&mut merger.buffer1, destination_buffer, global_throughput) {
@@ -359,6 +384,43 @@ impl NetComponent {
                                 global_throughput,
                             );
                             mixing = Some(BeltNetGoof::ItemMixing);
+                        }
+                    }
+
+                    // In an even distribution, we first split the effective throughput in half, permitting one half to each output. We then give any leftover throughput to whichever buffer had no left-overs.
+                    (true, true, Priority::NONE) => {
+
+                        let throughput = (if splitter.buffer.quantity < global_throughput { global_throughput } else { splitter.buffer.quantity }) / 2.0;
+
+                        let (adjacent_net_component_1, adjacent_part_1) = splitter.output1.adjacent.unwrap();
+                        let remainder_1 =
+                            if let Some(throughput_used) = buffer_transfer(&mut splitter.buffer,
+                                               adjacent_net_component_1.get_buffer(adjacent_part_1, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                               throughput) {
+                                throughput - throughput_used
+                            } else { mixing = Some(BeltNetGoof::ItemMixing); throughput };
+
+                        let (adjacent_net_component_2, adjacent_part_2) = splitter.output2.adjacent.unwrap();
+                        let remainder_2 =
+                            if let Some(throughput_used) = buffer_transfer(&mut splitter.buffer,
+                                                                           adjacent_net_component_2.get_buffer(adjacent_part_2, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                                                           throughput) {
+                                throughput - throughput_used
+                            } else { mixing = Some(BeltNetGoof::ItemMixing); throughput };
+
+                        match (remainder_1, remainder_2) {
+
+                            (0.0, 0.0) => {}
+
+                            (0.0, _) => { buffer_transfer(&mut splitter.buffer,
+                                                          adjacent_net_component_1.get_buffer(adjacent_part_1, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                                          remainder_2); }
+
+                            (_, 0.0) => { buffer_transfer(&mut splitter.buffer,
+                                                          adjacent_net_component_2.get_buffer(adjacent_part_2, (ports, straights, splitters, mergers, edges), surface_ports).unwrap(),
+                                                          remainder_1); }
+
+                            _ => {}
                         }
                     }
 
