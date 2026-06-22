@@ -710,7 +710,7 @@ impl BeltNet {
         let mut new_port: BeltPort = BeltPort { surface_id, io: None };
 
         for direction in Direction::enumerate() {
-            let neighbor = match self.positions.get(&position.add_delta(direction)) {
+            let neighbor = match self.positions.get(&position.add_delta(&direction)) {
                 None => continue,
                 Some(n) => n.clone()
             };
@@ -733,8 +733,8 @@ impl BeltNet {
         let new_id = self.new_component_id();
         self.positions.insert(position.clone(), NetComponent::STRAIGHT(new_id));
 
-        let mut input_neighbor = self.positions.get(&position.add_delta(straight.input.direction)).cloned();
-        let mut output_neighbor = self.positions.get(&position.add_delta(straight.output.direction)).cloned();
+        let mut input_neighbor = self.positions.get(&position.add_delta(&straight.input.direction)).cloned();
+        let mut output_neighbor = self.positions.get(&position.add_delta(&straight.output.direction)).cloned();
 
         let input_component = match input_neighbor { None => BeltIOPart::NONE, Some(net_component) => net_component.direction_to_io(self.buildings(), straight.input.direction.opposite()) };
         let output_component = match output_neighbor { None => BeltIOPart::NONE, Some(net_component) => net_component.direction_to_io(self.buildings(), straight.output.direction.opposite()) };
@@ -853,9 +853,9 @@ impl BeltNet {
 
         let new_id = self.new_component_id();
 
-        let input = self.positions.get(&position.add_delta(splitter.input.direction)).cloned();
-        let output1 = self.positions.get(&position.add_delta(splitter.output1.direction)).cloned();
-        let output2 = self.positions.get(&position.add_delta(splitter.output2.direction)).cloned();
+        let input = self.positions.get(&position.add_delta(&splitter.input.direction)).cloned();
+        let output1 = self.positions.get(&position.add_delta(&splitter.output1.direction)).cloned();
+        let output2 = self.positions.get(&position.add_delta(&splitter.output2.direction)).cloned();
 
         let new_net_component = NetComponent::SPLITTER(new_id);
 
@@ -901,9 +901,9 @@ impl BeltNet {
 
         let new_id = self.new_component_id();
 
-        let input1 = self.positions.get(&position.add_delta(merger.input1.direction)).cloned();
-        let input2 = self.positions.get(&position.add_delta(merger.input2.direction)).cloned();
-        let output = self.positions.get(&position.add_delta(merger.output.direction)).cloned();
+        let input1 = self.positions.get(&position.add_delta(&merger.input1.direction)).cloned();
+        let input2 = self.positions.get(&position.add_delta(&merger.input2.direction)).cloned();
+        let output = self.positions.get(&position.add_delta(&merger.output.direction)).cloned();
 
         let new_net_component = NetComponent::SPLITTER(new_id);
 

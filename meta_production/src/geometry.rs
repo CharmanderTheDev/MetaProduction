@@ -11,7 +11,7 @@ impl Point {
         self.y += other.y;
     }
 
-    pub fn add_delta(&self, direction: Direction) -> Point {
+    pub fn add_delta(&self, direction: &Direction) -> Point {
 
         add_points(
             self,
@@ -28,6 +28,11 @@ impl Point {
 pub fn add_points(a: &Point, b: &Point) -> Point {
 
     return Point { x: a.x + b.x, y: a.y + b.y };
+}
+
+pub fn taxicab_distance(a: &Point, b: &Point) -> i32 {
+
+    (a.x - b.x).abs() + (a.y - b.y).abs()
 }
 
 #[derive(Clone)]
