@@ -15,12 +15,7 @@ impl Point {
 
         add_points(
             self,
-            match direction {
-                Direction::UP => &Point { x: 0, y: 1 },
-                Direction::DOWN => &Point { x: 0, y: -1 },
-                Direction::RIGHT => &Point { x: 1, y: 0 },
-                Direction::LEFT => &Point { x: -1, y: 0 },
-            },
+            direction.to_delta(),
         )
     }
 }
@@ -124,4 +119,14 @@ impl Direction {
     }
 
     pub(crate) fn enumerate() -> Vec<Direction> { vec![Direction::UP, Direction::DOWN, Direction::RIGHT, Direction::LEFT] }
+
+    pub(crate) fn to_delta(&self) -> &Point {
+
+        match self {
+            Direction::UP => &Point { x: 0, y: 1 },
+            Direction::DOWN => &Point { x: 0, y: -1 },
+            Direction::RIGHT => &Point { x: 1, y: 0 },
+            Direction::LEFT => &Point { x: -1, y: 0 },
+        }
+    }
 }

@@ -1,0 +1,9 @@
+- add underground belts
+- add underground pipes
+- finish pipe system construction/destruction methods
+- create pipe tick methods
+    - Each PipeNet affords an equal portion of its remaining space to its inputs
+    - Each PipeNet affords an equal portion of its effective throughput to its outputs
+    - initiate transfers according to these limits and repeat, recalculating limits
+    - when no space or no throughput is left, the tick is finished.
+    - note: do NOT recompute valve open/closed states on these subticks, or update buffers.
