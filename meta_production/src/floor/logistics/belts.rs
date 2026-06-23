@@ -544,7 +544,7 @@ struct StraightBelt {
 
     /// None means a non-underground straight belt, Some(None) means an unlinked underground straight belt, Some(Some(u64)) holds the linked belt's id.
     /// The BeltIOPart indicates which part (input/output) is linked underground.
-    underground: Option<(Option<u64>, BeltIOPart)>,
+    underground: Option<BeltIOPart>,
 
     edge: u64,
 }
@@ -600,8 +600,8 @@ impl StraightBelt {
 
     fn direction_to_io(&self, direction: Direction) -> BeltIOPart {
 
-        if direction == self.input.direction && self.underground.map_or(true, |(_, belt_io_part)| { belt_io_part != BeltIOPart::INPUT1 }) { return BeltIOPart::INPUT1 }
-        if direction == self.output.direction && self.underground.map_or(true, |(_, belt_io_part)| { belt_io_part != BeltIOPart::OUTPUT1 }){ return BeltIOPart::OUTPUT1 }
+        if direction == self.input.direction && self.underground.map_or(true, |belt_io_part| { belt_io_part != BeltIOPart::INPUT1 }) { return BeltIOPart::INPUT1 }
+        if direction == self.output.direction && self.underground.map_or(true, |belt_io_part| { belt_io_part != BeltIOPart::OUTPUT1 }){ return BeltIOPart::OUTPUT1 }
 
         BeltIOPart::NONE
     }
@@ -920,7 +920,7 @@ impl BeltNet {
     fn link_undergrounds(&mut self, underground_belt: &mut StraightBelt, position: Point) -> (Option<NetComponent>, Option<NetComponent>) {
 
         let mut probe = position.clone();
-        let (_, io_part) = &mut underground_belt.underground.unwrap();
+        let io_part = &mut underground_belt.underground.unwrap();
         let (delta, matching_io_part, matching_direction) =
             match io_part {
                 BeltIOPart::INPUT1 => (underground_belt.input.direction.to_delta(), BeltIOPart::OUTPUT1, underground_belt.input.direction.opposite()),
@@ -937,23 +937,22 @@ impl BeltNet {
 
                 let StraightBelt {
 
-                    input: BeltComponent { direction: input_direction, ..},
-                    output: BeltComponent { direction: output_direction, ..},
+                    input: BeltComponent { direction: input_direction, adjacent: input_adjacent },
+                    output: BeltComponent { direction: output_direction, adjacent: output_adjacent },
 
-                    underground: Some((None, belt_io_part)), ..
+                    underground: Some(belt_io_part), ..
 
                 } = self.straights.get(straight_id).unwrap() &&
 
                 *belt_io_part == matching_io_part &&
 
                 match matching_io_part {
-                    BeltIOPart::INPUT1 => *input_direction == matching_direction,
-                    BeltIOPart::OUTPUT1 => *output_direction == matching_direction,
+                    BeltIOPart::INPUT1 => (*input_direction == matching_direction) && input_adjacent.is_none(),
+                    BeltIOPart::OUTPUT1 => (*output_direction == matching_direction) && output_adjacent.is_none(),
                     _ => { panic!("Improper BeltIOPart present in link_undergrounds") }
                 }
 
             {
-                underground_belt.underground = Some((Some(*straight_id), *io_part));
                 linked_underground = Some(*straight_net_component);
             }
         }
@@ -1090,8 +1089,6 @@ impl BeltNet {
     }
 
     fn remove_straight(&mut self, id: u64) {
-
-        todo!("implement removal procedures for underground belts");
 
         let straight = self.straights.remove(&id).unwrap();
 
