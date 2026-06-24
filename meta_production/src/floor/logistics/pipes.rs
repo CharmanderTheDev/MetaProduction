@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 use crate::floor::surface::{mix_buffers, Buffer, Port, PortMode};
-use crate::geometry::{taxicab_distance, Direction, Point};
+use crate::geometry::{add_points, taxicab_distance, Direction, Point};
 
 // The amount of traversal required for this is going to be significantly more than belts. If hashing proves too slow, sparse lists could be used instead.
 pub struct PipeSystem {
@@ -231,7 +231,7 @@ impl PipeSystem {
     }
 
     /// returns true if the pipe was placed, and false if it wasn't
-    fn add_pipe(&mut self, position: Point, surface_ports: &HashMap<u64, Port>) -> bool {
+    fn add_pipe(&mut self, position: Point, underground: Option<Underground>, surface_ports: &HashMap<u64, Port>) -> bool {
 
         if self.positions.get(&position).is_some() { return false; }
 
@@ -239,9 +239,14 @@ impl PipeSystem {
         let mut pipe_components: Vec<PipeComponent> = Vec::with_capacity(4);
         let mut output_valves: Vec<u64> = Vec::with_capacity(4);
 
-        for direction in Direction::enumerate() {
+        // ug idatori
+        for (direction, linked_position) in if let Some(ug) = underground {
+            self.add_underground(position.clone(), ug)
+        } else {
+            Direction::enumerate().iter().map(|d| { (*d, position.add_delta(&d)) }).collect::<Vec<_>>()
+        } {
 
-            match self.positions.get(&position.add_delta(&direction)) {
+            match self.positions.get(&linked_position) {
 
                 Some(PipeComponent::PIPE(pipe_net_id)) => pipe_nets.push(*pipe_net_id),
                 Some(PipeComponent::UNDERGROUND(ug_id)) => {
@@ -373,6 +378,41 @@ impl PipeSystem {
         }
     }
 
+    fn add_underground(&mut self, position: Point, mut underground: Underground) -> Vec<(Direction, Point)> {
+
+        let ug_id = self.get_new_component_id();
+
+        let mut probe = position.clone();
+        let delta = underground.direction.to_delta();
+
+        for _ in 0..self.underground_range {
+
+            probe.add(delta);
+            if let Some(PipeComponent::UNDERGROUND(link_id)) = self.positions.get(&probe) {
+
+                let link = self.undergrounds.get_mut(&link_id).unwrap();
+                if (link.direction != underground.direction.opposite()) || underground.link.is_some() { continue; }
+
+                link.link = Some(ug_id);
+                underground.link = Some(*link_id);
+
+                return vec![(underground.direction, add_points(&probe, delta)), (underground.direction.opposite(), position.add_delta(&underground.direction.opposite()))]
+            }
+        }
+
+        vec![(underground.direction.opposite(), position.add_delta(&underground.direction.opposite()))]
+    }
+
+    /*
+    fn add port
+
+    fn add_valve
+
+    fn add_tank
+
+    fn add_pump
+    */
+
     fn remove_pipe(&mut self, position: &Point, surface_ports: &mut HashMap<u64, Port>) {
 
         let original_pipenet_id = self.get_pipenet_id(&position).unwrap();
@@ -397,6 +437,8 @@ impl PipeSystem {
                     let ug = self.undergrounds.remove(ug_id).unwrap();
 
                     if let Some(link) = ug.link {
+
+                        self.undergrounds.get_mut(&link).unwrap().link = None;
 
                         Vec::from([
                             (ug.direction, self.undergrounds.get(&link).unwrap().position.add_delta(&ug.direction)),
@@ -592,7 +634,7 @@ impl PipeSystem {
 
         if (a == b) && ( b_underground.is_none_or(|underground| { underground.direction == from } ) ) { return true }
 
-        let mut directions = match self.positions.get(a) {
+        let directions = match self.positions.get(a) {
 
             Some(PipeComponent::PIPE(_)) => { Self::priority_deltas(a, b).iter().map(|direction| { (direction.clone(), a.add_delta(direction)) } ).collect::<Vec<_>>() },
 
