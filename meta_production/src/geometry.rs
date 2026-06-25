@@ -43,6 +43,126 @@ impl Rectangle {
     fn from_points(min: Point, max: Point) -> Self {
         Self { min, max }
     }
+
+    pub(crate) fn iterate_area(&self) -> RectangleAreaIterator { RectangleAreaIterator { min: self.min.clone(), max: self.max.clone(), current: Point { x: self.max.x, y: self.min.y - 1 } }}
+
+    pub(crate) fn iterate_perimeter(&self) -> RectanglePerimeterIterator { RectanglePerimeterIterator { min: self.min.clone(), max: self.max.clone(), current: Point { x: self.min.x - 1, y: self.min.y }}}
+}
+
+pub struct RectangleAreaIterator {
+
+    min: Point,
+    max: Point,
+
+    current: Point,
+}
+
+impl Iterator for RectangleAreaIterator {
+
+    type Item = Point;
+
+    fn next(&mut self) -> Option<Self::Item> {
+
+        self.current.x += 1;
+        if self.current.x > self.max.x {
+
+            self.current.y += 1;
+            self.current.x = self.min.x;
+
+            if self.current.y > self.max.y {
+
+                return None;
+            }
+        }
+
+        Some(self.current.clone())
+    }
+}
+
+/// Iterates around the perimeter, returning either 1 (for edges) or 2 (for corners) points directly connected to some point on the perimeter
+pub struct RectanglePerimeterIterator {
+
+    min: Point,
+    max: Point,
+
+    current: Point,
+}
+
+// iterates like this:
+// 01234
+// 5xxx6
+// 7xxx8
+// 9xxx0
+// 12345
+
+impl Iterator for RectanglePerimeterIterator {
+
+    type Item = (Point, (Point, Option<Point>));
+
+    fn next(&mut self) -> Option<Self::Item> {
+
+        if self.current.y == self.min.y || self.current.y == self.max.y {
+
+            self.current.x += 1;
+            if self.current.x > self.max.x {
+
+                (self.current.x, self.current.y) = (self.min.x, self.current.y + 1);
+                if self.current.y > self.max.y {
+
+                    return None
+                }
+            }
+        }
+
+        else {
+
+            if self.current.x > self.min.x { (self.current.x, self.current.y) = (self.min.x, self.current.y + 1) }
+            else { (self.current.x, self.current.y) = (self.max.x, self.current.y) }
+        }
+
+        Some((
+
+            self.current.clone(),
+            (match self.current.y {
+
+                y if y == self.min.y => {
+
+                    (
+                        Point { x: self.current.x, y: self.min.y - 1},
+                        match self.current.x {
+
+                            x if x == self.min.x => Some( Point { x: self.min.x - 1, y: self.min.y }),
+                            x if x == self.max.x => Some( Point { x: self.max.x + 1, y: self.min.y }),
+                            _ => None
+                        })
+                }
+
+                y if y == self.max.y => {
+
+                    (
+                        Point { x: self.current.x, y: self.current.y + 1},
+                        match self.current.x {
+
+                            x if x == self.min.x => Some(Point { x: self.min.x - 1, y: self.max.y }),
+                            x if x == self.max.x => Some(Point { x: self.max.x + 1, y: self.max.y }),
+                            _ => None
+                        })
+                }
+
+                y @ _ => {
+
+                    (
+                        match self.current.x {
+
+                            x if x == self.min.x => Point { x: self.min.x - 1, y: self.current.y },
+                            x if x == self.max.x => Point { x: self.max.x + 1, y: self.current.y },
+                            _ => { panic!("RectanglePerimeterIterator generating non-perimeter points")}
+                        },
+                        None)
+                }
+            }),
+        ))
+    }
 }
 
 fn rectangles_intersect(a: &Rectangle, b: &Rectangle) -> bool {
@@ -128,5 +248,14 @@ impl Direction {
             Direction::RIGHT => &Point { x: 1, y: 0 },
             Direction::LEFT => &Point { x: -1, y: 0 },
         }
+    }
+
+    /// returns the direction going from a to b. Only works if a and b are adjacent.
+    pub fn from_points(a: &Point, b: &Point) -> Direction {
+
+        if a.y < b.y { return Direction::UP }
+        if a.y > b.y { return Direction::DOWN }
+        if a.x > b.x { return Direction::LEFT }
+        Direction::RIGHT
     }
 }

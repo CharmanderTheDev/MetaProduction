@@ -1,8 +1,9 @@
 use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
+use std::io::pipe;
 use std::ops::DerefMut;
 use crate::floor::surface::{mix_buffers, Buffer, Port, PortMode};
-use crate::geometry::{add_points, taxicab_distance, Direction, Point};
+use crate::geometry::{add_points, taxicab_distance, Direction, Point, Rectangle};
 
 // The amount of traversal required for this is going to be significantly more than belts. If hashing proves too slow, sparse lists could be used instead.
 pub struct PipeSystem {
@@ -175,8 +176,9 @@ struct Tank {
 }
 
 #[derive(PartialEq)]
-enum PortOutput {
+enum PortLogistics {
 
+    INPUT,
     PIPENET(u64),
     VALVE(u64),
 }
@@ -185,7 +187,7 @@ struct PipePort {
 
     surface_id: u64,
 
-    output: Option<PortOutput>,
+    logistics: Option<PortLogistics>,
 }
 
 impl PipeSystem {
@@ -284,16 +286,19 @@ impl PipeSystem {
                 PipeComponent::PORT(port_id) => {
 
                     let port = self.ports.get_mut(&port_id).unwrap();
+                    if port.logistics.is_some() { return }
+
                     match surface_ports.get(&port.surface_id).unwrap().mode {
 
                         PortMode::INPUT => {
 
                             pipenet.ports.insert(*port_id);
+                            port.logistics = Some(PortLogistics::INPUT);
                         },
 
                         PortMode::OUTPUT => {
 
-                            port.output = Some(PortOutput::PIPENET(pipenet_id));
+                            port.logistics = Some(PortLogistics::PIPENET(pipenet_id));
                         }
                     }
                 }
@@ -465,8 +470,8 @@ impl PipeSystem {
                     let port = self.ports.get_mut(port_id).unwrap();
                     match surface_ports.get(&port.surface_id).unwrap().mode {
 
-                        PortMode::INPUT => { pipe_net.ports.insert(*port_id); },
-                        PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(pipe_net_id)); },
+                        PortMode::INPUT => { pipe_net.ports.insert(*port_id); port.logistics = Some(PortLogistics::INPUT); },
+                        PortMode::OUTPUT => { port.logistics = Some(PortLogistics::PIPENET(pipe_net_id)); },
                     }
                 },
                 PipeComponent::VALVE(valve_id) => { pipe_net.valves.insert(*valve_id); },
@@ -581,7 +586,7 @@ impl PipeSystem {
                     match surface_port.mode {
 
                         PortMode::INPUT => { self.pipe_nets.get_mut(&pipe.pipenet).unwrap().ports.insert(new_port_id); },
-                        PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(pipe.pipenet)); },
+                        PortMode::OUTPUT => { port.logistics = Some(PortLogistics::PIPENET(pipe.pipenet)); },
                     }
 
                     return
@@ -590,8 +595,8 @@ impl PipeSystem {
                 Some(PipeComponent::UNDERGROUND(ug_id)) => { let ug = self.undergrounds.get(ug_id).unwrap(); if (ug.direction == *d) {
 
                     match surface_port.mode {
-                        PortMode::INPUT => { self.pipe_nets.get_mut(&ug.pipenet).unwrap().ports.insert(new_port_id); },
-                        PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(ug.pipenet)); },
+                        PortMode::INPUT => { self.pipe_nets.get_mut(&ug.pipenet).unwrap().ports.insert(new_port_id); port.logistics = Some(PortLogistics::INPUT); },
+                        PortMode::OUTPUT => { port.logistics = Some(PortLogistics::PIPENET(ug.pipenet)); },
                     }
                     return
                 }},
@@ -602,11 +607,12 @@ impl PipeSystem {
                     if (PortMode::INPUT == surface_port.mode) && (valve.output_direction == d.opposite()) {
 
                         valve.output = Some(ValveOutput::PORT(new_port_id));
+                        port.logistics = Some(PortLogistics::INPUT);
                         return
                     }
                     if (PortMode::OUTPUT == surface_port.mode) && (valve.input_direction == d.opposite()) {
 
-                        port.output = Some(PortOutput::VALVE(*valve_id));
+                        port.logistics = Some(PortLogistics::VALVE(*valve_id));
                         return
                     }
                 }
@@ -620,19 +626,183 @@ impl PipeSystem {
         true
     }
 
-    fn add_valve(&mut self, position: &Point, valve: Valve) -> bool {
+    fn add_valve(&mut self, position: &Point, mut valve: Valve) -> bool {
 
-        todo!()
+        if self.positions.contains_key(position) { return false }
+
+        let valve_id = self.get_new_component_id();
+
+        match self.positions.get(&position.add_delta(&valve.output_direction)) {
+
+            Some(PipeComponent::PIPE(pipe_id)) => {
+
+                let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                pipe.alter_connection(&valve.output_direction.opposite(), true);
+
+                valve.output = Some(ValveOutput::PIPENET(pipe.pipenet));
+            }
+
+            Some(PipeComponent::UNDERGROUND(ug_id)) => {
+
+                let ug = self.undergrounds.get(ug_id).unwrap();
+                if ug.direction == valve.output_direction {
+
+                    valve.output = Some(ValveOutput::PIPENET(ug.pipenet));
+                }
+            }
+
+            Some(PipeComponent::PORT(port_id)) => {
+
+                let port = self.ports.get_mut(port_id).unwrap();
+
+                if port.logistics.is_none() { valve.output = Some(ValveOutput::PORT(*port_id)); port.logistics = Some(PortLogistics::INPUT); }
+            }
+
+            _ => {}
+        }
+
+        match self.positions.get(&position.add_delta(&valve.input_direction)) {
+
+            Some(PipeComponent::PIPE(pipe_id)) => {
+
+                let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                pipe.alter_connection(&valve.input_direction.opposite(), true);
+
+                self.pipe_nets.get_mut(&pipe.pipenet).unwrap().valves.insert(valve_id);
+            }
+
+            Some(PipeComponent::UNDERGROUND(ug_id)) => {
+
+                let ug = self.undergrounds.get(ug_id).unwrap();
+
+                if ug.direction == valve.input_direction {
+
+                    self.pipe_nets.get_mut(&ug.pipenet).unwrap().valves.insert(valve_id);
+                }
+            }
+
+            Some(PipeComponent::PORT(port_id)) => {
+
+                let port = self.ports.get_mut(port_id).unwrap();
+
+                if port.logistics.is_none() { port.logistics = Some(PortLogistics::VALVE(valve_id)); }
+            }
+
+            _ => {}
+        }
+
+        self.positions.insert(position.clone(), PipeComponent::VALVE(valve_id));
+        self.valves.insert(valve_id, valve);
+
+        true
     }
 
-    fn add_tank(&mut self, position: &Point, tank: Tank) -> bool {
+    fn add_tank(&mut self, mut tank: Tank, hitbox: Rectangle) -> bool {
 
-        todo!()
+        if hitbox.iterate_area().any(|point| {
+
+            self.positions.contains_key(&point)
+
+        }) { return false; }
+
+        let tank_id = self.get_new_component_id();
+
+        hitbox.iterate_area().for_each(|point| { self.positions.insert(point.clone(), PipeComponent::TANK(tank_id)); });
+
+        hitbox.iterate_perimeter().for_each(|(perimeter_point, (connected_point, additional_point))| {
+
+            if tank.pipe_net.is_some() { return }
+
+            (if let Some(additional_point) = additional_point { vec![connected_point, additional_point] } else { vec![connected_point] }).iter().for_each(|point| {
+
+                if tank.pipe_net.is_some() { return }
+
+                if let Some(pipe_component) = self.positions.get(point) { match pipe_component {
+
+                    PipeComponent::PIPE(pipe_id) => {
+
+                        let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                        pipe.alter_connection(&Direction::from_points(&perimeter_point, point), true);
+
+                        tank.pipe_net = Some((perimeter_point.clone(), pipe.pipenet));
+                        let pipenet = self.pipe_nets.get_mut(&pipe.pipenet).unwrap();
+
+                        pipenet.tanks.insert(tank_id);
+                        pipenet.buffer.max_quantity += tank.capacity;
+                    }
+
+                    PipeComponent::UNDERGROUND(ug_id) => {
+
+                        let ug = self.undergrounds.get(ug_id).unwrap();
+                        if ug.direction == Direction::from_points(&perimeter_point, point) {
+
+                            tank.pipe_net = Some((perimeter_point.clone(), ug.pipenet));
+                            let pipenet = self.pipe_nets.get_mut(&ug.pipenet).unwrap();
+
+                            pipenet.tanks.insert(tank_id);
+                            pipenet.buffer.max_quantity += tank.capacity;
+                        }
+                    }
+
+                    _ => { } }
+                }
+            })
+        });
+
+        true
     }
 
-    fn add_pump(&mut self, position: &Point, pump: Pump) -> bool {
+    fn add_pump(&mut self, mut pump: Pump, hitbox: Rectangle) -> bool {
 
-        todo!()
+        if hitbox.iterate_area().any(|point| {
+
+            self.positions.contains_key(&point)
+
+        }) { return false; }
+
+        let pump_id = self.get_new_component_id();
+
+        hitbox.iterate_area().for_each(|point| { self.positions.insert(point.clone(), PipeComponent::PUMP(pump_id)); });
+
+        hitbox.iterate_perimeter().for_each(|(perimeter_point, (connected_point, additional_point))| {
+
+            if pump.pipe_net.is_some() { return }
+
+            (if let Some(additional_point) = additional_point { vec![connected_point, additional_point] } else { vec![connected_point] }).iter().for_each(|point| {
+
+                if pump.pipe_net.is_some() { return }
+
+                if let Some(pipe_component) = self.positions.get(point) { match pipe_component {
+
+                    PipeComponent::PIPE(pipe_id) => {
+
+                        let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                        pipe.alter_connection(&Direction::from_points(&perimeter_point, point), true);
+
+                        pump.pipe_net = Some((perimeter_point.clone(), pipe.pipenet));
+                        let pipenet = self.pipe_nets.get_mut(&pipe.pipenet).unwrap();
+
+                        pipenet.pumps.insert(pump_id);
+                    }
+
+                    PipeComponent::UNDERGROUND(ug_id) => {
+
+                        let ug = self.undergrounds.get(ug_id).unwrap();
+                        if ug.direction == Direction::from_points(&perimeter_point, point) {
+
+                            pump.pipe_net = Some((perimeter_point.clone(), ug.pipenet));
+                            let pipenet = self.pipe_nets.get_mut(&ug.pipenet).unwrap();
+
+                            pipenet.pumps.insert(pump_id);
+                        }
+                    }
+
+                    _ => { } }
+                }
+            })
+        });
+
+        true
     }
 
     fn remove_pipe(&mut self, position: &Point, surface_ports: &mut HashMap<u64, Port>) {
@@ -705,9 +875,15 @@ impl PipeSystem {
                 PipeComponent::PORT(port_id) => {
 
                     let port = self.ports.get_mut(&port_id).unwrap();
-                    if let Some(PortOutput::PIPENET(port_output_id)) = port.output && port_output_id == original_pipenet_id {
 
-                        port.output = None;
+                    if let Some(PortLogistics::PIPENET(port_output_id)) = port.logistics && port_output_id == original_pipenet_id {
+
+                        port.logistics = None;
+                    }
+
+                    if let Some(PortLogistics::INPUT) = port.logistics && self.pipe_nets.get(&original_pipenet_id).unwrap().ports.contains(&port_id) {
+
+                        port.logistics = None;
                     }
                 }
                 PipeComponent::VALVE(valve_id) => {
