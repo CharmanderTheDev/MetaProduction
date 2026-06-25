@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 use crate::floor::surface::{mix_buffers, Buffer, Port, PortMode};
@@ -19,6 +19,7 @@ pub struct PipeSystem {
 
     pipe_nets: HashMap<u64, PipeNet>,
 
+    pipes: HashMap<u64, Pipe>,
     undergrounds: HashMap<u64, Underground>,
     valves: HashMap<u64, Valve>,
     pumps: HashMap<u64, Pump>,
@@ -29,7 +30,7 @@ pub struct PipeSystem {
 #[derive(Clone, Copy)]
 enum PipeComponent {
 
-    PIPE(u64), // ID referring to the PipeNet it belongs to
+    PIPE(u64),
     UNDERGROUND(u64),
     VALVE(u64),
     PORT(u64),
@@ -41,7 +42,7 @@ struct PipeNet {
 
     buffer: Buffer,
 
-    pipes: HashSet<Point>,
+    pipes: HashSet<u64>,
     valves: HashSet<u64>,
     ports: HashSet<u64>,
     pumps: HashSet<u64>,
@@ -61,6 +62,67 @@ impl PipeNet {
             pumps: HashSet::new(),
             tanks: HashSet::new(),
         }
+    }
+}
+
+// Simply encodes which sides are connected to something
+// Why is it bitpacked? I felt like it.
+struct PipeShape {
+
+    shape: u8,
+}
+
+impl PipeShape {
+
+    fn is_connected(&self, direction: &Direction) -> bool{
+
+        match direction {
+
+            Direction::UP =>    { (self.shape & 0b0001) > 0 }
+            Direction::DOWN =>  { (self.shape & 0b0010) > 0 }
+            Direction::LEFT =>  { (self.shape & 0b0100) > 0 }
+            Direction::RIGHT => { (self.shape & 0b1000) > 0 }
+        }
+    }
+}
+
+struct Pipe {
+
+    pipenet: u64,
+
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+}
+
+impl Pipe {
+
+    fn alter_connection(&mut self, direction: &Direction, value: bool) {
+
+        match direction {
+
+            Direction::UP => { self.up = value; }
+            Direction::DOWN => { self.down = value;  }
+            Direction::LEFT => { self.left = value;  }
+            Direction::RIGHT => { self.right = value;  }
+        }
+    }
+
+    fn is_connected(&self, direction: &Direction) -> bool {
+
+        match direction {
+
+            Direction::UP => { self.up }
+            Direction::DOWN => { self.down }
+            Direction::LEFT => { self.left }
+            Direction::RIGHT => { self.right }
+        }
+    }
+
+    fn get_pipe_shape(&self) -> PipeShape {
+
+        PipeShape { shape: if self.up { 0b0001 } else { 0 } + if self.down { 0b0010 } else { 0 } + if self.left { 0b0100 } else { 0 } + if self.right { 0b1000 } else { 0 } }
     }
 }
 
@@ -112,6 +174,7 @@ struct Tank {
     pipe_net: Option<(Point, u64)>,
 }
 
+#[derive(PartialEq)]
 enum PortOutput {
 
     PIPENET(u64),
@@ -126,6 +189,33 @@ struct PipePort {
 }
 
 impl PipeSystem {
+
+    fn new(
+        throughput_cap: f64,
+        underground_range: u8
+    ) -> PipeSystem {
+
+        PipeSystem {
+
+            throughput_cap,
+            underground_range,
+
+            next_component_id: 1,
+
+            surface_port_to_pipe_port: HashMap::new(),
+
+            positions: HashMap::new(),
+
+            pipe_nets: HashMap::new(),
+
+            pipes: HashMap::new(),
+            undergrounds: HashMap::new(),
+            valves: HashMap::new(),
+            pumps: HashMap::new(),
+            tanks: HashMap::new(),
+            ports: HashMap::new(),
+        }
+    }
 
     fn get_new_component_id(&mut self) -> u64 {
 
@@ -144,15 +234,18 @@ impl PipeSystem {
 
             match pipe_component {
 
-                PipeComponent::PIPE(_) => {
+                PipeComponent::PIPE(pipe_id) => {
 
-                    pipenet.pipes.insert(position.clone());
+                    let pipe = self.pipes.get_mut(&pipe_id).unwrap();
+                    let pipe_shape = pipe.get_pipe_shape();
+
+                    pipenet.pipes.insert(*pipe_id);
+                    pipe.pipenet = pipenet_id;
                     pipenet.buffer.max_quantity += 1.0;
 
-                    self.positions.insert(position.clone(), PipeComponent::PIPE(pipenet_id));
                     for direction in Direction::enumerate() {
 
-                        if direction == from.opposite() { continue }
+                        if direction == from.opposite()  || !pipe_shape.is_connected(&direction) { continue }
 
                         self.build_pipenet(direction, position.add_delta(&direction), already_explored, pipenet, pipenet_id, surface_ports);
                     }
@@ -216,22 +309,27 @@ impl PipeSystem {
         let mut a = self.pipe_nets.remove(&id_a).unwrap();
         let b = self.pipe_nets.remove(&id_b).unwrap();
 
-        for pipe in &b.pipes {
-
-            self.positions.insert(pipe.clone(), PipeComponent::PIPE(id_a));
-        }
-
         a.pipes.extend(b.pipes);
         a.valves.extend(b.valves);
         a.ports.extend(b.ports);
         a.pumps.extend(b.pumps);
         a.tanks.extend(b.tanks);
 
+        for pipe in &a.pipes { self.pipes.get_mut(pipe).unwrap().pipenet = id_a; }
+        for valve in &a.valves { self.pipes.get_mut(valve).unwrap().pipenet = id_a; }
+        for port in &a.ports { self.pipes.get_mut(port).unwrap().pipenet = id_a; }
+        for pump in &a.pumps { self.pipes.get_mut(pump).unwrap().pipenet = id_a; }
+        for tank in &a.tanks { self.pipes.get_mut(tank).unwrap().pipenet = id_a; }
+
         a.buffer = mix_buffers(&a.buffer, &b.buffer);
+
+        self.pipe_nets.insert(id_a, a);
     }
 
     /// returns true if the pipe was placed, and false if it wasn't
     fn add_pipe(&mut self, position: Point, underground: Option<Underground>, surface_ports: &HashMap<u64, Port>) -> bool {
+
+        let is_underground = underground.is_some();
 
         if self.positions.get(&position).is_some() { return false; }
 
@@ -239,37 +337,75 @@ impl PipeSystem {
         let mut pipe_components: Vec<PipeComponent> = Vec::with_capacity(4);
         let mut output_valves: Vec<u64> = Vec::with_capacity(4);
 
+        let mut new_pipe = Pipe { pipenet: 0, up: false, down: false, left: false, right: false, };
+        let new_pipe_id = self.get_new_component_id();
+
         // ug idatori
         for (direction, linked_position) in if let Some(ug) = underground {
             self.add_underground(position.clone(), ug)
         } else {
             Direction::enumerate().iter().map(|d| { (*d, position.add_delta(&d)) }).collect::<Vec<_>>()
         } {
+            let adjacent = self.positions.get(&linked_position);
+            if let Some(adjacent) = adjacent {
 
-            match self.positions.get(&linked_position) {
+                match adjacent {
 
-                Some(PipeComponent::PIPE(pipe_net_id)) => pipe_nets.push(*pipe_net_id),
-                Some(PipeComponent::UNDERGROUND(ug_id)) => {
+                    pipe_pipe_component @ PipeComponent::PIPE(pipe_id) => {
 
-                    let underground = self.undergrounds.get(ug_id).unwrap();
-                    if underground.direction == direction { pipe_nets.push(underground.pipenet); }
+                        let pipe = self.pipes.get_mut(pipe_id).unwrap();
+
+                        pipe.alter_connection(&direction.opposite(), true);
+                        new_pipe.alter_connection(&direction, true);
+
+                        pipe_nets.push(pipe.pipenet);
+                        pipe_components.push(pipe_pipe_component.clone());
+                    },
+
+                    PipeComponent::UNDERGROUND(ug_id) => {
+
+                        let underground = self.undergrounds.get(ug_id).unwrap();
+                        if underground.direction == direction {
+
+                            new_pipe.alter_connection(&direction, true);
+                            pipe_nets.push(underground.pipenet);
+                        }
+                    },
+
+                    valve_pipe_component @ PipeComponent::VALVE(valve_id) => {
+
+                        let valve = self.valves.get(valve_id).unwrap();
+
+                        if valve.input_direction == direction.opposite() { new_pipe.alter_connection(&direction, true); pipe_components.push(valve_pipe_component.clone()); }
+                        if valve.output_direction == direction.opposite() { new_pipe.alter_connection(&direction, true); output_valves.push(*valve_id); }
+                    },
+
+                    tank_pipe_component @ PipeComponent::TANK(tank_id) => {
+
+                        let tank = self.tanks.get_mut(tank_id).unwrap();
+
+                        if tank.pipe_net.is_none() {
+
+                            new_pipe.alter_connection(&direction, true);
+                            tank.pipe_net = Some((linked_position, 0));
+                            pipe_components.push(tank_pipe_component.clone());
+                        }
+                    },
+
+                    pump_pipe_component @ PipeComponent::PUMP(pump_id) => {
+
+                        let pump = self.tanks.get_mut(pump_id).unwrap();
+
+                        if pump.pipe_net.is_none() {
+
+                            new_pipe.alter_connection(&direction, true);
+                            pump.pipe_net = Some((linked_position, 0));
+                            pipe_components.push(pump_pipe_component.clone());
+                        }
+                    },
+
+                    pipe_component => pipe_components.push(pipe_component.clone()),
                 }
-                Some(valve_pipe_component @ PipeComponent::VALVE(valve_id)) => {
-
-                    let valve = self.valves.get(valve_id).unwrap();
-                    if valve.input_direction == direction { pipe_components.push(valve_pipe_component.clone()); }
-                    if valve.output_direction == direction { output_valves.push(*valve_id); }
-                }
-                Some(tank @ PipeComponent::TANK(tank_id)) => {
-
-                    if self.tanks.get(tank_id).unwrap().pipe_net == None { pipe_components.push(tank.clone()); }
-                }
-                Some(pump @ PipeComponent::PUMP(pump_id)) => {
-
-                    if self.pumps.get(pump_id).unwrap().pipe_net == None { pipe_components.push(pump.clone()); }
-                }
-                Some(pipe_component) => pipe_components.push(pipe_component.clone()),
-                _ => {}
             }
         }
 
@@ -278,54 +414,19 @@ impl PipeSystem {
             self.connect_pipe_nets(pipe_nets[0], pipe_nets[index]);
         } }
 
-        let pipe_net_id = if pipe_nets.len() >= 1 {
-            pipe_nets[0]
+        let pipe_net_id = if let Some(pipe_net_id) = pipe_nets.get(0) {
+            *pipe_net_id
         } else {
             self.get_new_component_id()
         };
 
         for valve in output_valves { self.valves.get_mut(&valve).unwrap().output = Some(ValveOutput::PIPENET(pipe_net_id)); }
 
-        let pipe_net = if pipe_nets.len() >= 1 {
+        let mut pipe_net = if let Some(pipe_net_id) = pipe_nets.get(0) {
 
-            let mut pipe_net = self.pipe_nets.remove(&pipe_nets[0]).unwrap();
-
-            pipe_components.iter().for_each(|pipe_component| {
-
-                match pipe_component {
-
-                    PipeComponent::PORT(port_id) => {
-
-                        let port = self.ports.get_mut(&port_id).unwrap();
-                        match surface_ports.get(&port.surface_id).unwrap().mode {
-
-                            PortMode::INPUT => { pipe_net.ports.insert(*port_id); },
-                            PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(pipe_net_id)); },
-                        }
-                    }
-                    PipeComponent::VALVE(valve_id) => { pipe_net.valves.insert(*valve_id); }
-                    PipeComponent::PUMP(pump_id) => { pipe_net.pumps.insert(*pump_id); }
-                    PipeComponent::TANK(tank_id) => { pipe_net.tanks.insert(*tank_id); }
-                    _ => {}
-                };
-            });
-
-            pipe_net
+            self.pipe_nets.remove(pipe_net_id).unwrap()
 
         } else {
-
-            let (mut valves, mut ports, mut pumps, mut tanks) : (HashSet<u64>, HashSet<u64>, HashSet<u64>, HashSet<u64>) = (HashSet::new(), HashSet::new(), HashSet::new(), HashSet::new());
-            pipe_components.iter().for_each(|pipe_component| {
-
-                match pipe_component {
-
-                    PipeComponent::PORT(port_id) => { ports.insert(*port_id); }
-                    PipeComponent::VALVE(valve_id) => { valves.insert(*valve_id); }
-                    PipeComponent::PUMP(pump_id) => { pumps.insert(*pump_id); }
-                    PipeComponent::TANK(tank_id) => { tanks.insert(*tank_id); }
-                    _ => {}
-                };
-            });
 
             PipeNet {
 
@@ -334,53 +435,79 @@ impl PipeSystem {
 
                         match pipe_component {
 
-                            PipeComponent::PIPE(_) => 1.0,
                             PipeComponent::TANK(tank_id) => self.tanks.get(&tank_id).unwrap().capacity,
                             _ => 0.0
                         }
                     }).sum()
                 ),
 
-                pipes: HashSet::from([position]),
-                valves,
-                ports,
-                pumps,
-                tanks,
+                pipes: HashSet::new(),
+                valves: HashSet::new(),
+                ports: HashSet::new(),
+                pumps: HashSet::new(),
+                tanks: HashSet::new(),
             }
         };
+
+        pipe_components.iter().for_each(|pipe_component| {
+
+            match pipe_component {
+
+                PipeComponent::PIPE(pipe_id) => {
+
+                    let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                    pipe.pipenet = pipe_net_id;
+
+                    pipe_net.pipes.insert(*pipe_id);
+                },
+                PipeComponent::PORT(port_id) => {
+
+                    let port = self.ports.get_mut(port_id).unwrap();
+                    match surface_ports.get(&port.surface_id).unwrap().mode {
+
+                        PortMode::INPUT => { pipe_net.ports.insert(*port_id); },
+                        PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(pipe_net_id)); },
+                    }
+                },
+                PipeComponent::VALVE(valve_id) => { pipe_net.valves.insert(*valve_id); },
+                PipeComponent::PUMP(pump_id) => {
+
+                    let pump = self.pumps.get_mut(pump_id).unwrap();
+
+                    pump.pipe_net = Some((pump.pipe_net.as_ref().unwrap().0.clone(), pipe_net_id));
+                    pipe_net.pumps.insert(*pump_id);
+                },
+                PipeComponent::TANK(tank_id) => {
+
+                    let tank = self.tanks.get_mut(tank_id).unwrap();
+
+                    tank.pipe_net = Some((tank.pipe_net.as_ref().unwrap().0.clone(), pipe_net_id));
+                    pipe_net.tanks.insert(*tank_id);
+                },
+                _ => {},
+            };
+        });
+
+        if !is_underground {
+
+                new_pipe.pipenet = pipe_net_id;
+            pipe_net.pipes.insert(new_pipe_id);
+            self.pipes.insert(new_pipe_id, new_pipe);
+            self.positions.insert(position.clone(), PipeComponent::PIPE(new_pipe_id));
+        }
+
+        pipe_net.buffer.max_quantity += 1.0; // to account for the pipe we are adding in this function
 
         self.pipe_nets.insert(pipe_net_id, pipe_net);
 
         true
     }
 
-    fn get_pipenet_id(&self, position: &Point) -> Option<u64> {
-
-        match self.positions.get(position) {
-
-            Some(PipeComponent::PIPE(net_id)) => Some(*net_id),
-            Some(PipeComponent::UNDERGROUND(ug_id)) => Some(self.undergrounds.get(&ug_id).unwrap().pipenet),
-            _ => None,
-        }
-    }
-
-    fn remove(&mut self, position: &Point, surface_ports: &mut HashMap<u64, Port>) {
-
-        match self.positions.remove(position) {
-
-            Some(PipeComponent::PIPE(_)) | Some(PipeComponent::UNDERGROUND(_)) => { self.remove_pipe(position, surface_ports); }
-            Some(PipeComponent::PORT(port_id)) => { self.remove_port(position, port_id); }
-            Some(PipeComponent::VALVE(valve_id)) => { self.remove_valve(position, valve_id, surface_ports); }
-            Some(PipeComponent::TANK(tank_id)) => { self.remove_tank(position, tank_id); }
-            Some(PipeComponent::PUMP(pump_id)) => { self.remove_pump(position, pump_id); }
-
-            _ => {}
-        }
-    }
-
+    /// ONLY FOR INTERNAL USE, use add_pipe with Some(Underground) to add an underground.
     fn add_underground(&mut self, position: Point, mut underground: Underground) -> Vec<(Direction, Point)> {
 
         let ug_id = self.get_new_component_id();
+        self.positions.insert(position.clone(), PipeComponent::UNDERGROUND(ug_id));
 
         let mut probe = position.clone();
         let delta = underground.direction.to_delta();
@@ -400,18 +527,113 @@ impl PipeSystem {
             }
         }
 
-        vec![(underground.direction.opposite(), position.add_delta(&underground.direction.opposite()))]
+        let return_vec = vec![(underground.direction.opposite(), position.add_delta(&underground.direction.opposite()))];
+
+        self.undergrounds.insert(ug_id, underground);
+
+        return_vec
     }
 
-    /*
-    fn add port
+    // Pipe down lad
+    fn get_pipenet_id(&self, position: &Point) -> Option<u64> {
 
-    fn add_valve
+        match self.positions.get(position) {
 
-    fn add_tank
+            Some(PipeComponent::PIPE(pipe_id)) => Some(self.pipes.get(pipe_id).unwrap().pipenet),
+            Some(PipeComponent::UNDERGROUND(ug_id)) => Some(self.undergrounds.get(ug_id).unwrap().pipenet),
+            _ => None,
+        }
+    }
 
-    fn add_pump
-    */
+    fn remove(&mut self, position: &Point, surface_ports: &mut HashMap<u64, Port>) {
+
+        match self.positions.remove(position) {
+
+            Some(PipeComponent::PIPE(_)) | Some(PipeComponent::UNDERGROUND(_)) => { self.remove_pipe(position, surface_ports); }
+            Some(PipeComponent::PORT(port_id)) => { self.remove_port(position, port_id); }
+            Some(PipeComponent::VALVE(valve_id)) => { self.remove_valve(position, valve_id, surface_ports); }
+            Some(PipeComponent::TANK(tank_id)) => { self.remove_tank(position, tank_id); }
+            Some(PipeComponent::PUMP(pump_id)) => { self.remove_pump(position, pump_id); }
+
+            _ => {}
+        }
+    }
+
+
+    fn add_port(&mut self, position: &Point, mut port: PipePort, surface_id: u64, surface_ports: &mut HashMap<u64, Port>) -> bool {
+
+        if self.positions.get(position).is_some() { return false }
+
+        let surface_port = surface_ports.get(&surface_id).unwrap();
+
+        let new_port_id = self.get_new_component_id();
+        self.positions.insert(position.clone(), PipeComponent::PORT(new_port_id));
+
+        Direction::enumerate().iter().for_each(|d| {
+
+            match self.positions.get(&position.add_delta(d)) {
+
+                Some(PipeComponent::PIPE(pipe_id)) => {
+
+                    let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                    pipe.alter_connection(&d.opposite(), true);
+
+                    match surface_port.mode {
+
+                        PortMode::INPUT => { self.pipe_nets.get_mut(&pipe.pipenet).unwrap().ports.insert(new_port_id); },
+                        PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(pipe.pipenet)); },
+                    }
+
+                    return
+                },
+
+                Some(PipeComponent::UNDERGROUND(ug_id)) => { let ug = self.undergrounds.get(ug_id).unwrap(); if (ug.direction == *d) {
+
+                    match surface_port.mode {
+                        PortMode::INPUT => { self.pipe_nets.get_mut(&ug.pipenet).unwrap().ports.insert(new_port_id); },
+                        PortMode::OUTPUT => { port.output = Some(PortOutput::PIPENET(ug.pipenet)); },
+                    }
+                    return
+                }},
+
+                Some(PipeComponent::VALVE(valve_id)) => {
+
+                    let valve = self.valves.get_mut(valve_id).unwrap();
+                    if (PortMode::INPUT == surface_port.mode) && (valve.output_direction == d.opposite()) {
+
+                        valve.output = Some(ValveOutput::PORT(new_port_id));
+                        return
+                    }
+                    if (PortMode::OUTPUT == surface_port.mode) && (valve.input_direction == d.opposite()) {
+
+                        port.output = Some(PortOutput::VALVE(*valve_id));
+                        return
+                    }
+                }
+
+                _ => {}
+            }
+        });
+
+        self.ports.insert(new_port_id, port);
+
+        true
+    }
+
+    fn add_valve(&mut self, position: &Point, valve: Valve) -> bool {
+
+        todo!()
+    }
+
+    fn add_tank(&mut self, position: &Point, tank: Tank) -> bool {
+
+        todo!()
+    }
+
+    fn add_pump(&mut self, position: &Point, pump: Pump) -> bool {
+
+        todo!()
+    }
 
     fn remove_pipe(&mut self, position: &Point, surface_ports: &mut HashMap<u64, Port>) {
 
@@ -459,7 +681,13 @@ impl PipeSystem {
 
             match self.positions.get(&point) {
 
-                Some(PipeComponent::PIPE(_)) | Some(PipeComponent::UNDERGROUND(_)) => {
+                Some(PipeComponent::PIPE(pipe_id)) => {
+
+                    self.pipes.get_mut(pipe_id).unwrap().alter_connection(&direction.opposite(), false);
+                    Some((direction.clone(), position.clone()))
+                },
+
+                Some(PipeComponent::UNDERGROUND(_)) => {
 
                     Some((direction.clone(), position.clone()))
                 },
@@ -534,18 +762,22 @@ impl PipeSystem {
 
     fn remove_port(&mut self, position: &Point, port_id: u64) {
 
+        todo!()
     }
 
     fn remove_valve(&mut self, position: &Point, valve_id: u64, surface_ports: &mut HashMap<u64, Port>) {
 
+        todo!()
     }
 
     fn remove_tank(&mut self, position: &Point, tank_id: u64) {
 
+        todo!()
     }
 
     fn remove_pump(&mut self, position: &Point, pump_id: u64) {
 
+        todo!()
     }
 
     /// recursive, attempts to find a path by moving a closer to b.
@@ -557,23 +789,27 @@ impl PipeSystem {
 
         match self.positions.get(a) {
 
-            Some(PipeComponent::PIPE(_)) => {
+            Some(PipeComponent::PIPE(pipe_id)) => {
 
-                Direction::enumerate().iter().any(|direction| {
+                let pipe = self.pipes.get(pipe_id).unwrap();
 
-                    self.path_between_pipes(
-                        &a.add_delta(direction),
-                        b,
-                        &match self.positions.get(b) {
+                Direction::enumerate().iter()
+                    .filter(|direction| { pipe.is_connected(direction) } )
+                    .any(|direction| {
 
-                            Some(PipeComponent::PIPE(_)) => { None }
-                            Some(PipeComponent::UNDERGROUND(ug_id)) => { Some( self.undergrounds.get(ug_id).unwrap()) },
-                            _ => return false,
-                        },
-                        *direction,
-                        &mut visited,
-                    )
-                })
+                        self.path_between_pipes(
+                            &a.add_delta(direction),
+                            b,
+                            &match self.positions.get(b) {
+
+                                Some(PipeComponent::PIPE(_)) => { None }
+                                Some(PipeComponent::UNDERGROUND(ug_id)) => { Some( self.undergrounds.get(ug_id).unwrap()) },
+                                _ => return false,
+                            },
+                            *direction,
+                            &mut visited,
+                        )
+                    })
             }
 
             Some(PipeComponent::UNDERGROUND(ug_id)) => {
@@ -636,7 +872,11 @@ impl PipeSystem {
 
         let directions = match self.positions.get(a) {
 
-            Some(PipeComponent::PIPE(_)) => { Self::priority_deltas(a, b).iter().map(|direction| { (direction.clone(), a.add_delta(direction)) } ).collect::<Vec<_>>() },
+            Some(PipeComponent::PIPE(pipe_id)) => {
+
+                let pipe = self.pipes.get(pipe_id).unwrap();
+                Self::priority_deltas(a, b).iter().filter_map(|direction| { if pipe.is_connected(direction) { Some((direction.clone(), a.add_delta(direction))) } else { None } } ).collect::<Vec<_>>()
+            },
 
             Some(PipeComponent::UNDERGROUND(ug_id)) => {
 
@@ -667,7 +907,7 @@ impl PipeSystem {
 
         directions.iter().any(|(direction, point)| {
 
-            self.path_between_pipes(&point, b, b_underground, *direction, visited)
+            if *direction == from.opposite() { false } else { self.path_between_pipes(&point, b, b_underground, *direction, visited) }
         })
     }
 }

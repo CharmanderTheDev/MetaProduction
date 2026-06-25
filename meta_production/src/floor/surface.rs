@@ -85,6 +85,7 @@ impl Surface {
     }
 }
 
+#[derive(PartialEq)]
 pub enum PortMode {
 
     INPUT,
