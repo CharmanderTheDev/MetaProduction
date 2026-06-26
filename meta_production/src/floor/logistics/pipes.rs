@@ -166,6 +166,8 @@ struct Pump {
     throughput_multiplier: f64,
 
     pipe_net: Option<(Point, u64)>, // the Point notates where it is connected through
+
+    hitbox: Rectangle,
 }
 
 struct Tank {
@@ -173,6 +175,8 @@ struct Tank {
     capacity: f64,
 
     pipe_net: Option<(Point, u64)>,
+
+    hitbox: Rectangle,
 }
 
 #[derive(PartialEq)]
@@ -556,9 +560,9 @@ impl PipeSystem {
 
             Some(PipeComponent::PIPE(_)) | Some(PipeComponent::UNDERGROUND(_)) => { self.remove_pipe(position, surface_ports); }
             Some(PipeComponent::PORT(port_id)) => { self.remove_port(position, port_id); }
-            Some(PipeComponent::VALVE(valve_id)) => { self.remove_valve(position, valve_id, surface_ports); }
-            Some(PipeComponent::TANK(tank_id)) => { self.remove_tank(position, tank_id); }
-            Some(PipeComponent::PUMP(pump_id)) => { self.remove_pump(position, pump_id); }
+            Some(PipeComponent::VALVE(valve_id)) => { self.remove_valve(position, valve_id); }
+            Some(PipeComponent::TANK(tank_id)) => { self.remove_tank(tank_id); }
+            Some(PipeComponent::PUMP(pump_id)) => { self.remove_pump(pump_id); }
 
             _ => {}
         }
@@ -938,22 +942,137 @@ impl PipeSystem {
 
     fn remove_port(&mut self, position: &Point, port_id: u64) {
 
-        todo!()
+        let port = self.ports.get_mut(&port_id).unwrap();
+
+        self.surface_port_to_pipe_port.remove(&port.surface_id);
+
+        Direction::enumerate().iter().for_each(|direction| {
+
+            if let Some(pipe_component) = self.positions.get(&position.add_delta(direction)) {
+
+                if let PipeComponent::PIPE(pipe_id) = pipe_component {
+
+                    let pipe = self.pipes.get_mut(pipe_id).unwrap();
+                    pipe.alter_connection(&direction.opposite(), false);
+
+                    self.pipe_nets.get_mut(&pipe.pipenet).unwrap().ports.remove(&port_id);
+                }
+
+                if let PipeComponent::UNDERGROUND(ug_id) = pipe_component {
+
+                    self.pipe_nets.get_mut(&self.undergrounds.get_mut(ug_id).unwrap().pipenet).unwrap().ports.remove(&port_id);
+                }
+            }
+        });
     }
 
-    fn remove_valve(&mut self, position: &Point, valve_id: u64, surface_ports: &mut HashMap<u64, Port>) {
+    fn remove_valve(&mut self, position: &Point, valve_id: u64) {
 
-        todo!()
+        let valve = self.valves.remove(&valve_id).unwrap();
+
+        match self.positions.get(&position.add_delta(&valve.input_direction)) {
+
+            Some(PipeComponent::PIPE(pipe_id)) => {
+
+                let pipe = self.pipes.get_mut(pipe_id).unwrap();
+
+                pipe.alter_connection(&valve.input_direction.opposite(), false);
+                self.pipe_nets.get_mut(&pipe.pipenet).unwrap().valves.remove(&valve_id);
+            }
+
+            Some(PipeComponent::UNDERGROUND(ug_id)) => {
+
+                self.pipe_nets.get_mut(&self.undergrounds.get(ug_id).unwrap().pipenet).unwrap().valves.remove(&valve_id);
+            }
+
+            Some(PipeComponent::PORT(port_id)) => {
+
+                let port = self.ports.get_mut(&port_id).unwrap();
+
+                if let Some(PortLogistics::VALVE(port_valve_id)) = port.logistics && port_valve_id == valve_id {
+
+                    port.logistics = None;
+                }
+            }
+
+            _ => {}
+        }
+
+        match self.positions.get(&position.add_delta(&valve.output_direction)) {
+
+            Some(PipeComponent::PIPE(pipe_id)) => {
+
+                self.pipes.get_mut(pipe_id).unwrap().alter_connection(&valve.output_direction.opposite(), false);
+            }
+
+            Some(PipeComponent::PORT(port_id)) => {
+
+                let port = self.ports.get_mut(&port_id).unwrap();
+
+                if let Some(PortLogistics::INPUT) = port.logistics { if let Some(ValveOutput::PORT(valve_port_id)) = valve.output && valve_port_id == *port_id {
+
+                    port.logistics = None;
+                } }
+            }
+
+            _ => {}
+        }
     }
 
-    fn remove_tank(&mut self, position: &Point, tank_id: u64) {
+    fn remove_tank(&mut self, tank_id: u64) {
 
-        todo!()
+        let tank = self.tanks.remove(&tank_id).unwrap();
+
+        if let Some((connection_point, pipe_net_id)) = tank.pipe_net {
+
+            Direction::enumerate().iter().for_each(|direction| {
+
+                match self.positions.get(&connection_point.add_delta(direction)) {
+
+                    Some(PipeComponent::PIPE(pipe_id)) => {
+                        let pipe = self.pipes.get_mut(&pipe_id).unwrap();
+
+                        pipe.alter_connection(&direction.opposite(), false);
+                    }
+
+                    _ => {}
+                }
+            });
+
+            self.pipe_nets.get_mut(&pipe_net_id).unwrap().tanks.remove(&tank_id);
+        }
+
+        tank.hitbox.iterate_area().for_each(|point| {
+
+            self.positions.remove(&point);
+        });
     }
 
-    fn remove_pump(&mut self, position: &Point, pump_id: u64) {
+    fn remove_pump(&mut self, pump_id: u64) {
 
-        todo!()
+        let pump = self.pumps.remove(&pump_id).unwrap();
+
+        if let Some((connection_point, pipe_net_id)) = pump.pipe_net {
+
+            Direction::enumerate().iter().for_each(|direction| {
+
+                match self.positions.get(&connection_point.add_delta(direction)) {
+
+                    Some(PipeComponent::PIPE(pipe_id)) => {
+                        self.pipes.get_mut(&pipe_id).unwrap().alter_connection(&direction.opposite(), false);
+                    }
+
+                    _ => {}
+                }
+            });
+
+            self.pipe_nets.get_mut(&pipe_net_id).unwrap().pumps.remove(&pump_id);
+        }
+
+        pump.hitbox.iterate_area().for_each(|point| {
+
+            self.positions.remove(&point);
+        });
     }
 
     /// recursive, attempts to find a path by moving a closer to b.
