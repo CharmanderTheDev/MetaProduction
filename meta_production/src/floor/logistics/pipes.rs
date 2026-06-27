@@ -2,13 +2,14 @@ use std::cmp::{Ordering, PartialEq};
 use std::collections::{HashMap, HashSet};
 use std::io::pipe;
 use std::ops::DerefMut;
-use crate::floor::surface::{mix_buffers, Buffer, Port, PortMode};
+use crate::floor::surface::{buffer_transfer, mix_buffers, mixing_transfer, Buffer, Port, PortMode};
 use crate::geometry::{add_points, taxicab_distance, Direction, Point, Rectangle};
 
 // The amount of traversal required for this is going to be significantly more than belts. If hashing proves too slow, sparse lists could be used instead.
 pub struct PipeSystem {
 
     throughput_cap: f64,
+    base_throughput: f64,
 
     underground_range: u8,
 
@@ -161,6 +162,7 @@ struct Valve {
     function: ValveMode,
 }
 
+//TODO: pumps need to be reworked to be tied into the machine system, most likely outputting a resource called "pressure" that pipe nets will consume to increase throughput
 struct Pump {
 
     throughput_multiplier: f64,
@@ -197,12 +199,14 @@ struct PipePort {
 impl PipeSystem {
 
     fn new(
+        base_throughput: f64,
         throughput_cap: f64,
         underground_range: u8
     ) -> PipeSystem {
 
         PipeSystem {
 
+            base_throughput,
             throughput_cap,
             underground_range,
 
@@ -1205,4 +1209,252 @@ impl PipeSystem {
             if *direction == from.opposite() { false } else { self.path_between_pipes(&point, b, b_underground, *direction, visited) }
         })
     }
+
+    fn valve_open(&self, valve: &Valve, input_percent_full: f64, surface_ports: &HashMap<u64, Port>) -> bool {
+
+        match valve.function {
+
+            ValveMode::INPUTMAX(input_max) => { input_percent_full <= input_max }
+            ValveMode::INPUTMIN(input_min) => { input_percent_full >= input_min }
+            ValveMode::OUTPUTMAX(output_max) => {
+
+                match valve.output {
+
+                    Some(ValveOutput::PIPENET(pipenet_id)) => { self.pipe_nets.get(&pipenet_id).unwrap().buffer.how_full() <= output_max }
+                    Some(ValveOutput::PORT(port_id)) => { surface_ports.get(&self.ports.get(&port_id).unwrap().surface_id).unwrap().buffer.how_full() <= output_max }
+                    _ => false
+                }
+            }
+            ValveMode::OUTPUTMIN(output_min) => {
+
+                match valve.output {
+
+                    Some(ValveOutput::PIPENET(pipenet_id)) => { self.pipe_nets.get(&pipenet_id).unwrap().buffer.how_full() >= output_min }
+                    Some(ValveOutput::PORT(port_id)) => { surface_ports.get(&self.ports.get(&port_id).unwrap().surface_id).unwrap().buffer.how_full() >= output_min }
+                    _ => false
+                }
+            }
+        }
+    }
+
+    fn tick(&mut self, surface_ports: &mut HashMap<u64, Port>) {
+
+        let mut pushing_entities: HashMap<u64, PushingEntity> = HashMap::new();
+
+        self.pipe_nets.iter().for_each(|(pipenet_id, pipenet)| {
+
+            let percent_full = pipenet.buffer.how_full();
+
+            let output_throughput = (self.base_throughput / (1.0 + (pipenet.pipes.len() as f64 / 64.0))) *
+                pipenet.pumps.iter().map(|pump_id| { self.pumps.get(pump_id).unwrap().throughput_multiplier }).product::<f64>()
+                    .clamp(0.0, pipenet.buffer.quantity).clamp(0.0, self.throughput_cap);
+            let input_throughput = pipenet.buffer.remaining_space();
+
+            let mut outputs: HashSet<PushingPart> = pipenet.ports.iter().map(|port| { PushingPart::PORT(*port) }).collect();
+            outputs.extend(pipenet.valves.iter().filter_map(|valve_id| {
+
+                let valve = self.valves.get(valve_id).unwrap();
+
+                if self.valve_open(valve, percent_full, surface_ports) {
+
+                    match valve.output {
+
+                        Some(ValveOutput::PIPENET(pipenet_id)) => { Some(PushingPart::PIPENET(pipenet_id)) }
+                        Some(ValveOutput::PORT(port_id)) => { Some(PushingPart::PORT(port_id)) }
+                        _ => None
+                    }
+                } else { None }
+
+
+            }));
+
+            pushing_entities.insert(*pipenet_id,
+            PushingEntity {
+
+                myself: PushingPart::PIPENET(*pipenet_id),
+
+                outputs,
+                inputs: 0,
+
+                output_throughput,
+                input_throughput,
+
+                output_provision: 0.0,
+                input_provision: 0.0,
+            });
+        });
+
+        self.ports.iter().for_each(|(port_id, port)| {
+
+            let surface_port = surface_ports.get(&port.surface_id).unwrap();
+
+            let percent_full = surface_port.buffer.how_full();
+
+            let output_throughput = surface_port.buffer.quantity;
+
+            let input_throughput  = surface_port.buffer.remaining_space();
+
+            let mut outputs: HashSet<PushingPart> = HashSet::new();
+            match port.logistics {
+
+                Some(PortLogistics::PIPENET(pipenet_id)) => { outputs.insert(PushingPart::PIPENET(pipenet_id)); }
+                Some(PortLogistics::VALVE(valve_id)) => {
+
+                    let valve = self.valves.get(&valve_id).unwrap();
+
+                    if self.valve_open(valve, percent_full, surface_ports) {
+
+                        match valve.output {
+
+                            Some(ValveOutput::PIPENET(pipenet_id)) => { outputs.insert(PushingPart::PIPENET(pipenet_id)); }
+                            Some(ValveOutput::PORT(port_id)) => { outputs.insert(PushingPart::PORT(port_id)); }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            pushing_entities.insert(port.surface_id,
+            PushingEntity {
+
+                myself: PushingPart::PORT(port.surface_id),
+
+                outputs,
+                inputs: 0,
+
+                output_throughput,
+                input_throughput,
+
+                output_provision: 0.0,
+                input_provision: 0.0,
+            });
+        });
+
+        let keys = pushing_entities.keys().cloned().collect::<Vec<_>>();
+        keys.iter().for_each(|key| {
+
+            let pushing_entity = pushing_entities.remove(key).unwrap();
+
+            pushing_entity.outputs.iter().for_each(|output| {
+
+                match output { PushingPart::PIPENET(id) | PushingPart::PORT(id) => {
+
+                    pushing_entities.get_mut(id).unwrap().inputs += 1;
+                }}
+            });
+
+            pushing_entities.insert(*key, pushing_entity);
+        });
+
+        let mut fluid_moved = true;
+        while fluid_moved {
+
+            fluid_moved = false;
+
+            pushing_entities.iter_mut().for_each(|(_, pushing_entity)| {
+
+                pushing_entity.input_provision = pushing_entity.input_throughput / pushing_entity.inputs as f64;
+                pushing_entity.output_provision = pushing_entity.output_throughput / pushing_entity.outputs.len() as f64;
+            });
+
+            keys.iter().for_each(|key| {  let mut pushing_entity = pushing_entities.remove(&key).unwrap(); pushing_entity.outputs.retain(|receiver_pushing_part| {
+
+                match pushing_entity.myself {
+
+                    PushingPart::PIPENET(pipenet_id) => {
+
+                        let mut giver_pipenet = self.pipe_nets.remove(&pipenet_id).unwrap();
+                        let giver_buffer: &mut Buffer = &mut giver_pipenet.buffer;
+
+                        let receiver_entity = pushing_entities.get_mut(match receiver_pushing_part { PushingPart::PIPENET(id) => id, PushingPart::PORT(id) => id }).unwrap();
+
+                        let (receiver_buffer, input_provision): (&mut Buffer, f64) = match receiver_pushing_part {
+
+                            PushingPart::PIPENET(receiving_pipenet_id) => {
+
+                                (&mut self.pipe_nets.get_mut(receiving_pipenet_id).unwrap().buffer,
+                                 receiver_entity.input_provision)
+                            }
+                            PushingPart::PORT(receiving_port_id) => {
+
+                                (&mut surface_ports.get_mut(receiving_port_id).unwrap().buffer,
+                                    receiver_entity.input_provision)
+                            }
+                        };
+
+                        let transferred = mixing_transfer(giver_buffer, receiver_buffer, f64::min(pushing_entity.output_provision, input_provision));
+
+                        if transferred > 0.0 { fluid_moved = true; }
+
+                        pushing_entity.output_throughput -= transferred;
+                        receiver_entity.input_throughput -= transferred;
+
+                        if pushing_entity.output_throughput <= 0.0 { receiver_entity.inputs -= 1; } // We remove our current giver as an input for the receiver if the giver cannot give anymore
+
+                        self.pipe_nets.insert(pipenet_id, giver_pipenet);
+
+                        receiver_entity.input_throughput > 0.0 // We remove our current receiver as an output for the giver if it cannot receive anymore
+                    }
+
+                    PushingPart::PORT(port_id) => {
+
+                        let mut giver_port = surface_ports.remove(&port_id).unwrap();
+                        let giver_buffer: &mut Buffer = &mut giver_port.buffer;
+
+                        let receiver_entity = pushing_entities.get_mut(match receiver_pushing_part { PushingPart::PIPENET(id) => id, PushingPart::PORT(id) => id }).unwrap();
+
+                        let (receiver_buffer, input_provision): (&mut Buffer, f64) = match receiver_pushing_part {
+
+                            PushingPart::PIPENET(receiving_pipenet_id) => {
+
+                                (&mut self.pipe_nets.get_mut(receiving_pipenet_id).unwrap().buffer,
+                                 receiver_entity.input_provision)
+                            }
+                            PushingPart::PORT(receiving_port_id) => {
+
+                                (&mut surface_ports.get_mut(receiving_port_id).unwrap().buffer,
+                                 receiver_entity.input_provision)
+                            }
+                        };
+
+                        let transferred = mixing_transfer(giver_buffer, receiver_buffer, f64::min(pushing_entity.output_provision, input_provision));
+
+                        if transferred >= 0.0 { fluid_moved = true; }
+
+                        pushing_entity.output_throughput -= transferred;
+                        receiver_entity.input_throughput -= transferred;
+
+                        if pushing_entity.output_throughput <= 0.0 { receiver_entity.inputs -= 1; }
+
+                        surface_ports.insert(port_id, giver_port);
+
+                        receiver_entity.input_throughput >= 0.0
+                    }
+                }
+
+            }); pushing_entities.insert(*key, pushing_entity); });
+        }
+    }
+}
+
+struct PushingEntity {
+
+    myself: PushingPart,
+
+    outputs: HashSet<PushingPart>,
+    inputs: u32,
+
+    output_throughput: f64,
+    input_throughput: f64,
+
+    output_provision: f64,
+    input_provision: f64,
+}
+
+#[derive(Eq, Hash, PartialEq)]
+enum PushingPart {
+
+    PORT(u64),
+    PIPENET(u64),
 }

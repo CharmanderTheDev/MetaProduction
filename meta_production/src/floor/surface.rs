@@ -136,6 +136,21 @@ pub fn buffer_transfer(from: &mut Buffer, to: &mut Buffer, mut throughput: f64) 
     Some(throughput)
 }
 
+// returns amount transferred. If item mixing occurs, turns receivers fluids to junk.
+pub fn mixing_transfer(from: &mut Buffer, to: &mut Buffer, mut throughput: f64) -> f64 {
+
+    throughput = if from.quantity >= throughput { throughput } else { from.quantity }; // Only take as much as we can
+    throughput = if to.max_quantity - to.quantity >= throughput { throughput } else { to.max_quantity - to.quantity }; // Only give as much as we can fit
+
+    from.next_quantity -= throughput;
+    to.next_quantity += throughput;
+
+    if (to.product_id == 0) && (throughput != 0.0) { to.next_product_id = from.product_id; }
+    if (to.product_id != from.product_id) && (throughput != 0.0) { to.next_product_id = 1; }
+
+    throughput
+}
+
 // used in the fluid system
 pub fn mix_buffers(a: &Buffer, b: &Buffer) -> Buffer {
 
@@ -185,4 +200,6 @@ impl Buffer {
     }
 
     pub fn remaining_space(&self) -> f64 { self.max_quantity - self.quantity }
+    
+    pub fn how_full(&self) -> f64 { self.quantity / self.max_quantity }
 }
